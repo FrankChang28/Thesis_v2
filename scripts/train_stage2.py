@@ -1,0 +1,32 @@
+"""Run a Stage 2 LOSO experiment from one strict YAML configuration."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from subject_nirs.common.config import apply_dataclass_config, load_yaml
+from subject_nirs.stage2.config import CFG
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True, help="Stage 2 YAML file")
+    args = parser.parse_args()
+    apply_dataclass_config(CFG, load_yaml(args.config))
+    if CFG.cohort_file is None and (Path(__file__).resolve().parents[1] / "configs/subject_cohort.json").exists():
+        raise ValueError("Supply a configs/stage2 YAML containing the fixed subject cohort")
+
+    # Import after applying the config so the workflow sees one authoritative CFG.
+    if CFG.execution_mode == "descriptor_control":
+        from subject_nirs.stage2.descriptor_controls import run_descriptor_controls
+
+        run_descriptor_controls()
+    else:
+        from subject_nirs.stage2.loso import run_loso
+
+        run_loso()
+
+
+if __name__ == "__main__":
+    main()

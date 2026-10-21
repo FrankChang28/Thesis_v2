@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+
+# Local datasets, training state, and large intermediate outputs
+# Keep only data/README.md in Git; all real research data and metadata stay local.
+data/*
+!data/README.md
+artifacts/
+cache/
+*.pth
+*.pt
+*.npz
+*.npy
+*.mat
+*.h5
+
+# Generated analysis tables are reproducible; curated figures may be committed.
+/results/
+/runs/
+
+# Editors and OS
+.history/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Dataset, cache, trained models and experiment outputs
+/data/
+/cache/
+/artifacts/
+/results/
+/runs/
+/logs/
+/notebooks/
+*.pt
+*.pth
+*.ckpt
+
+# Python generated files and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Local credentials
+.env
+.env.*
+!.env.example

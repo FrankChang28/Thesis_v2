@@ -1,0 +1,27 @@
+{
+  "raw_num_subjects": 154,
+  "id_base": 0,
+  "remove_subject_ids": [
+    5,
+    15,
+    23,
+    28,
+    36,
+    70,
+    71,
+    74,
+    89,
+    93,
+    99,
+    100,
+    112,
+    115,
+    119,
+    126,
+    128,
+    134
+  ],
+  "val_subject_count": 10,
+  "split_seed": 100,
+  "confirmed": true
+}

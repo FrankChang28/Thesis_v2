@@ -1,0 +1,435 @@
+"""Load one subject-level feature vector per subject.
+
+Supported sources
+-----------------
+dtof:
+    DTOF-derived Z_s loaded from NPZ and standardized with the current
+    fold's training subjects only.
+
+metadata:
+    Four tissue-thickness features loaded from CSV columns 5:9 and standardized
+    with the current fold's training subjects only.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+
+from .config import CFG
+
+
+EPS = 1e-8
+
+
+def _validate_train_subjects(train_subjects: Sequence[int]) -> np.ndarray:
+    subject_ids = np.asarray(train_subjects, dtype=np.int64).reshape(-1)
+
+    if subject_ids.size == 0:
+        raise ValueError("train_subjects cannot be empty")
+
+    if subject_ids.min() < 0 or subject_ids.max() >= CFG.num_subjects:
+        raise ValueError("train_subjects contains an invalid subject ID")
+
+    if np.unique(subject_ids).size != subject_ids.size:
+        raise ValueError("train_subjects contains duplicate subject IDs")
+    if not set(subject_ids).issubset(CFG.active_subject_ids):
+        raise ValueError("train_subjects contains an excluded subject")
+
+    return subject_ids
+
+
+def resolve_structure_path(test_id: int) -> Path:
+    """Resolve a static NPZ path or a fold-specific path template."""
+    path = Path(
+        str(CFG.structure_feature_path).format(
+            test_id=test_id,
+            test_id_1based=test_id + 1,
+        )
+    ).expanduser()
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Structure feature file not found: {path}"
+        )
+
+    return path
+
+
+def _reorder_by_subject_ids(
+    features: np.ndarray,
+    subject_ids: np.ndarray | None,
+) -> np.ndarray:
+    """Reorder feature rows to zero-based subject order 0..S-1."""
+    if subject_ids is None:
+        return features
+
+    subject_ids = np.asarray(subject_ids, dtype=np.int64).reshape(-1)
+
+    if subject_ids.shape[0] != features.shape[0]:
+        raise ValueError(
+            "subject_ids length does not match the number of feature rows"
+        )
+
+    expected = np.arange(CFG.num_subjects, dtype=np.int64)
+
+    if np.array_equal(subject_ids, expected):
+        return features
+
+    if not np.array_equal(np.sort(subject_ids), expected):
+        raise ValueError(
+            "subject_ids must contain every zero-based subject ID exactly once"
+        )
+
+    return features[np.argsort(subject_ids)]
+
+
+def _standardize_from_training_subjects(
+    features: np.ndarray,
+    train_subjects: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Z-score every feature using training subjects only."""
+    train_values = features[train_subjects]
+
+    mean = train_values.mean(axis=0, keepdims=True)
+    std = train_values.std(axis=0, keepdims=True)
+    std = np.where(std < EPS, 1.0, std)
+
+    normalized = (features - mean) / std
+
+    return (
+        normalized.astype(np.float32),
+        mean.astype(np.float32),
+        std.astype(np.float32),
+    )
+
+
+def _apply_control(
+    features: np.ndarray,
+    test_id: int,
+    train_subjects: np.ndarray,
+    val_subjects: np.ndarray,
+) -> Tuple[np.ndarray, str]:
+    """Apply actual, zero, or split-safe shuffled subject features."""
+    mode = str(CFG.structure_control).strip().lower()
+
+    if mode == "actual":
+        return features, "actual"
+
+    if mode == "zero":
+        return np.zeros_like(features), "zero"
+
+    if mode != "shuffle":
+        raise ValueError(
+            f"Unknown structure_control={CFG.structure_control!r}"
+        )
+
+    rng = np.random.default_rng(
+        int(CFG.structure_shuffle_seed) + int(test_id)
+    )
+
+    val_subjects = np.asarray(val_subjects, dtype=np.int64).reshape(-1)
+    test_subjects = np.asarray([test_id], dtype=np.int64)
+    split_subjects = np.concatenate(
+        (train_subjects, val_subjects, test_subjects)
+    )
+    if (
+        split_subjects.size != len(CFG.active_subject_ids)
+        or np.unique(split_subjects).size != len(CFG.active_subject_ids)
+        or not np.array_equal(
+            np.sort(split_subjects),
+            np.asarray(CFG.active_subject_ids, dtype=np.int64),
+        )
+    ):
+        raise ValueError(
+            "train, validation, and test subjects must be disjoint and "
+            "cover every subject before shuffling"
+        )
+
+    shuffled = features.copy()
+
+    descriptions = []
+
+    # Training and validation are deranged independently. This preserves each
+    # split's descriptor distribution without attaching a subject's own
+    # descriptor to its DRS rows.
+    for name, group in (
+        ("train", train_subjects),
+        ("validation", val_subjects),
+    ):
+        group = np.asarray(group, dtype=np.int64)
+
+        if group.size <= 1:
+            raise ValueError(f"{name} split needs at least two subjects to shuffle")
+
+        shift = int(rng.integers(1, group.size))
+        source_ids = np.roll(group, shift)
+        shuffled[group] = features[source_ids]
+        descriptions.append(f"{name}_shift_{shift}")
+
+    # The held-out test subject receives a wrong descriptor sampled only from
+    # training subjects. Its own descriptor therefore cannot affect training
+    # or validation, and validation cannot act as a transductive donor.
+    test_donor = int(rng.choice(train_subjects))
+    shuffled[test_id] = features[test_donor]
+    descriptions.append(f"test_donor_{test_donor}")
+
+    return shuffled.astype(np.float32), "shuffle:" + ",".join(descriptions)
+
+
+def load_dtof_bank(
+    test_id: int,
+    train_subjects: np.ndarray,
+) -> Tuple[np.ndarray, str]:
+    """Load one DTOF-derived Z_s vector per subject from an NPZ file."""
+    path = resolve_structure_path(test_id)
+
+    with np.load(path, allow_pickle=True) as data:
+        available = set(data.files)
+
+        requested_key = str(
+            getattr(CFG, "structure_feature_key", "latent_raw")
+        )
+
+        candidate_keys = list(
+            dict.fromkeys(
+                [
+                    requested_key,
+                    "latent_raw",
+                    "raw_features",
+                    "z",
+                    "z_scores",
+                ]
+            )
+        )
+        feature_key = next(
+            (key for key in candidate_keys if key in available),
+            None,
+        )
+
+        if feature_key is None:
+            raise KeyError(
+                f"{path} contains none of {candidate_keys}. "
+                f"Available keys: {sorted(available)}"
+            )
+
+        features = np.asarray(data[feature_key], dtype=np.float32)
+        if CFG.cohort_file:
+            from ..common.cohort import check_partition
+            cohort = CFG.cohort()
+            if str(data.get("cohort_fingerprint", "")) != cohort.fingerprint:
+                raise ValueError("DTOF descriptor belongs to another cohort")
+            if list(map(int, data["test_subject_ids"])) != [test_id]:
+                raise ValueError("DTOF descriptor belongs to another held-out subject")
+            check_partition(cohort, data["train_subject_ids"],
+                            data["val_subject_ids"], [test_id])
+        subject_ids = (
+            np.asarray(data["subject_ids"], dtype=np.int64)
+            if "subject_ids" in available
+            else None
+        )
+        if "holdout_subject_ids" in available:
+            holdout_ids = np.asarray(
+                data["holdout_subject_ids"],
+                dtype=np.int64,
+            ).reshape(-1)
+        elif "test_subject_ids" in available:
+            holdout_ids = np.asarray(
+                data["test_subject_ids"],
+                dtype=np.int64,
+            ).reshape(-1)
+        elif "test_subject_id" in available:
+            holdout_ids = np.asarray(
+                data["test_subject_id"],
+                dtype=np.int64,
+            ).reshape(-1)
+        else:
+            holdout_ids = np.empty(0, dtype=np.int64)
+
+    if features.ndim != 2:
+        raise ValueError(
+            "Expected DTOF features [subjects, z_dim], "
+            f"got {features.shape}"
+        )
+
+    if features.shape[0] != CFG.num_subjects:
+        raise ValueError(
+            f"Expected {CFG.num_subjects} subjects, "
+            f"got {features.shape[0]}"
+        )
+
+    features = _reorder_by_subject_ids(features, subject_ids)
+
+    requested_dim = int(CFG.structure_feature_dim)
+    if requested_dim <= 0:
+        raise ValueError("structure_feature_dim must be positive")
+
+    if features.shape[1] < requested_dim:
+        raise ValueError(
+            f"Requested {requested_dim} DTOF dimensions, "
+            f"but {feature_key} only contains {features.shape[1]}"
+        )
+
+    features = features[:, :requested_dim]
+
+    if not np.isfinite(features).all():
+        raise ValueError("DTOF feature matrix contains NaN or Inf")
+
+    if holdout_ids.size > 0:
+        if test_id not in holdout_ids:
+            raise ValueError(
+                "Wrong fold-specific DTOF file: "
+                f"test subject {test_id} is not in "
+                f"holdout_subject_ids={holdout_ids.tolist()}"
+            )
+    else:
+        print(
+            "WARNING: DTOF NPZ has no declared holdout subject. "
+            "It may be an exploratory full-data representation."
+        )
+
+    # Prefer loading z_scores and normalize here with the prediction model's
+    # current training subjects. This keeps preprocessing consistent per fold.
+    features, _, _ = _standardize_from_training_subjects(
+        features,
+        train_subjects,
+    )
+
+    return features, f"{path}:{feature_key}"
+
+
+def load_metadata_bank(
+    train_subjects: np.ndarray,
+) -> Tuple[np.ndarray, str]:
+    """Load four handcrafted tissue-thickness features per subject."""
+    path = Path(CFG.metadata_feature_path).expanduser()
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Metadata file not found: {path}"
+        )
+
+    frame = pd.read_csv(path, header=0)
+
+    if frame.shape[1] < 9:
+        raise ValueError(
+            "Metadata CSV must contain at least nine columns because "
+            "tissue-thickness features are read from columns 5:9. "
+            f"Got shape {frame.shape}."
+        )
+
+    metadata = frame.iloc[:, 5:9].to_numpy(dtype=np.float32)
+
+    expected_shape = (CFG.num_subjects, 4)
+    if metadata.shape != expected_shape:
+        raise ValueError(
+            f"Expected metadata shape {expected_shape}, "
+            f"got {metadata.shape}"
+        )
+
+    if not np.isfinite(metadata).all():
+        raise ValueError("Metadata contains NaN or Inf")
+
+    thickness = metadata
+
+    standardized_thickness, _, _ = _standardize_from_training_subjects(
+        thickness,
+        train_subjects,
+    )
+
+    # Do not clip held-out thickness values. Large absolute z-scores correctly
+    # indicate that a held-out subject lies far from the training distribution.
+    features = standardized_thickness.astype(np.float32)
+
+    return features, str(path)
+
+
+def load_structure_bank(
+    test_id: int,
+    train_subjects: Sequence[int],
+    val_subjects: Sequence[int],
+) -> Tuple[np.ndarray, str]:
+    """Load and normalize exactly one configured subject-feature source."""
+    train_subjects_array = _validate_train_subjects(train_subjects)
+    source = str(CFG.subject_feature_source).strip().lower()
+
+    if source == "dtof":
+        bank, source_path = load_dtof_bank(
+            test_id=test_id,
+            train_subjects=train_subjects_array,
+        )
+    elif source == "metadata":
+        bank, source_path = load_metadata_bank(
+            train_subjects=train_subjects_array,
+        )
+    else:
+        raise ValueError(
+            "subject_feature_source must be 'dtof' or 'metadata', "
+            f"got {CFG.subject_feature_source!r}"
+        )
+
+    if bank.ndim != 2:
+        raise ValueError(
+            "Expected subject feature bank [subjects, dim], "
+            f"got {bank.shape}"
+        )
+
+    if bank.shape[0] != CFG.num_subjects:
+        raise ValueError(
+            f"Expected {CFG.num_subjects} subjects, "
+            f"got {bank.shape[0]}"
+        )
+
+    if not np.isfinite(bank).all():
+        raise ValueError("Subject feature bank contains NaN or Inf")
+
+    bank, applied_control = _apply_control(
+        bank,
+        test_id=test_id,
+        train_subjects=train_subjects_array,
+        val_subjects=np.asarray(val_subjects, dtype=np.int64),
+    )
+
+    print(
+        "Loaded subject features\n"
+        f"  source: {source}\n"
+        f"  path: {source_path}\n"
+        f"  shape: {bank.shape}\n"
+        f"  control: {applied_control}"
+    )
+
+    return bank.astype(np.float32), source_path
+
+
+def lookup_subject_features(
+    subject_ids: np.ndarray,
+    feature_bank: np.ndarray,
+) -> np.ndarray:
+    """Return one complete subject vector for every DRS sample."""
+    subject_ids = np.asarray(subject_ids, dtype=np.int64).reshape(-1)
+
+    if feature_bank.ndim != 2:
+        raise ValueError(
+            "Expected feature_bank [subjects, feature_dim], "
+            f"got {feature_bank.shape}"
+        )
+
+    if subject_ids.size == 0:
+        return np.empty(
+            (0, feature_bank.shape[1]),
+            dtype=np.float32,
+        )
+
+    if subject_ids.min() < 0 or subject_ids.max() >= feature_bank.shape[0]:
+        raise ValueError(
+            "Sample subject ID is outside the subject feature bank"
+        )
+
+    return np.asarray(feature_bank[subject_ids], dtype=np.float32)
+
+
+# Compatibility for older scripts.
+load_latent_bank = load_structure_bank
