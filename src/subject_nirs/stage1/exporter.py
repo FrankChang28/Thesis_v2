@@ -445,17 +445,16 @@ def main(args: argparse.Namespace) -> None:
         "cohort_fingerprint": np.asarray(cohort.fingerprint),
         "active_subject_ids": np.asarray(cohort.subject_ids, dtype=np.int64),
         "excluded_subject_ids": np.asarray(cohort.excluded_subject_ids, dtype=np.int64),
-        # Main feature consumed by Abs_prediction.
+        # Subject descriptor consumed by Stage 2.
         # "Raw" means it has not received checkpoint-train z-score
         # normalization. It is an observed acquisition embedding selected by
         # proximity to the subject's spherical center.
         "latent_raw": latent_raw,
 
-        # Canonical alias for new consumers. ``latent_raw`` remains for
-        # compatibility with existing Stage 2 configurations.
+        # Descriptive alias for the same unstandardized subject descriptor.
         "dtof_descriptor_raw": latent_raw,
 
-        # Alias retained for compatibility and easier inspection.
+        # Additional name for inspecting the unstandardized feature array.
         "raw_features": latent_raw,
 
         "subject_ids": subject_ids,

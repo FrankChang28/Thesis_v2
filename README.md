@@ -1,68 +1,163 @@
-# 跨個體 NIRS 預測專案（136 人）
+# 跨個體 NIRS 預測專案
 
-此目錄為最終碩論專案。原始資料仍使用154筆subject的排列，`configs/subject_cohort.json`排除18筆；實際136-fold，各折125 train／10 validation／1 test。保留原始subject IDs，不將資料索引改成0–135。
+本專案包含碩士論文使用的兩階段流程：第一階段從光子飛行時間分布（distribution of time of flight, DTOF）學習個體描述子；第二階段以漫反射光譜（diffuse reflectance spectroscopy, DRS）為主要輸入，結合個體資訊，預測灰質總血紅素濃度（tHb）與組織血氧飽和度（StO₂）。實驗比較 DRS-only baseline、32 維 DTOF 描述子及組織厚度特徵，並評估不同融合方式與訓練策略。
 
-## 目錄
+主要實驗採用 136 名個體的 leave-one-subject-out（LOSO）評估。以下指令均在專案根目錄（`pyproject.toml` 所在位置）執行；完整訓練需要另外準備研究資料及相應運算資源。
 
-- `configs/`：兩階段、baseline、fusion與控制實驗設定。
-- `data/raw/`：原始DTOF／DRS；`data/metadata_aligned.csv`為已對齊資料的metadata。
-- `src/`、`scripts/`：模型、訓練、匯出與正式分析入口。
-- `notebooks/`：論文正式圖表與結果分析。
-- `artifacts/stage1/<原始ID>/relat_cons_32/`：Stage1模型與特徵。
-- `artifacts/stage2/<fusion>/<strategy>/<feature>/<target>/`：Stage2模型與預測；baseline位於`stage2/baseline/<target>`。
-- `cache/stage2/`：共用前處理；`results/tables/`、`results/figures/`：論文結果。
+## 研究流程
 
-目錄不再含cohort雜湊；根目錄的`.cohort.json`與各模型metadata保留名單識別，防止混用其他cohort。若日後更改名單，應指定獨立輸出／cache並更新該輸出根的marker，不可沿用舊模型。
+1. **DTOF 表徵學習**：以共用 temporal CNN 編碼各 SDS 的 DTOF 形狀與相對面積，透過個體原型對比學習與個體內緊湊性目標，學習單位長度的個體表徵。每名個體的描述子由最接近其球面中心的 acquisition embedding 代表。
+2. **DRS 絕對參數預測**：以 CNN 建立 DRS-only baseline，再分別加入 DTOF 描述子或四維組織厚度特徵。融合方式包含 Concatenation、FiLM 與 Gated residual；訓練策略包含 Scratch 與 Fine-tuning。
+3. **跨個體評估**：每折保留 1 名測試個體、10 名驗證個體，其餘 125 名用於訓練。前處理與特徵標準化使用訓練個體估計，驗證資料用於模型選擇，測試個體用於最終評估。
 
-## 執行
+個體名單與切分由 [`configs/subject_cohort.json`](configs/subject_cohort.json) 管理。資料與模型保留原始 subject ID，因此原始陣列／設定中的 154 筆索引不等同於實際使用人數；正式 LOSO 評估涵蓋名單中的 136 名個體。
 
-在專案根目錄使用既有yc_ae環境，或安裝`pip install -e ".[notebook,test]"`。可設定`SUBJECT_NIRS_PYTHON`指定Python。
+## 目錄導覽
+
+| 目錄 | 用途 |
+| --- | --- |
+| `configs/` | 第一、二階段及控制實驗的 YAML 設定與個體名單。 |
+| `data/` | 原始 DTOF、DRS 與已對齊的組織厚度資料。 |
+| `src/subject_nirs/stage1/` | DTOF 表徵學習、描述子匯出及第一階段分析。 |
+| `src/subject_nirs/stage2/` | DRS 預測、特徵融合、LOSO 訓練及第二階段分析。 |
+| `scripts/` | 訓練、匯出、續跑與基本檢查的執行入口。 |
+| `notebooks/` | 依論文分析順序整理的圖表與結果檢視。 |
+| `artifacts/` | 模型權重、逐折設定及測試預測。 |
+| `cache/` | 前處理資料與各訓練折的正規化紀錄。 |
+| `results/tables/`、`results/figures/` | 分析表格與圖檔。 |
+| `tests/` | 設定、切分、模型及結果處理的測試。 |
+
+版本控制提供程式、設定與測試；研究資料、快取、模型、notebook 與結果另行準備。上表也列出完整研究工作目錄中使用的分析與輸出位置。Notebook 負責串接分析與展示，主要計算及繪圖邏輯位於 `src/`。
+
+## 安裝與確認
+
+訓練流程使用 Linux、Python 3.10 以上版本及 PyTorch。請依本機 GPU／CUDA 環境安裝適合的 PyTorch，再安裝專案與分析、測試依賴：
+
+```bash
+python -m pip install -e ".[notebook,test]"
+python scripts/smoke_test.py
+pytest -q
+```
+
+亦可使用既有 Conda 環境。Shell 執行入口可透過 `SUBJECT_NIRS_PYTHON` 指定 Python；GPU 可透過 `CUDA_VISIBLE_DEVICES` 選擇。
+
+## 資料準備
+
+原始資料放置方式如下；也可使用符號連結指向實際儲存位置：
+
+```text
+data/
+├── raw/
+│   ├── stage1/
+│   │   ├── dataset_dtof.mat
+│   │   └── dataset_OP.mat
+│   └── stage2/
+│       └── NIRS_Absolute_Dataset_grid.mat
+└── metadata_aligned.csv
+```
+
+`metadata_aligned.csv` 的資料列須與原始 subject ID 對齊；Stage 2 的厚度特徵讀取第 6–9 欄（Python 切片 `5:9`）。輸入／輸出路徑與實驗參數均由 `configs/` 中的 YAML 管理。程式中的目標名稱 `hc` 對應 tHb，`sto2` 對應 StO₂。
+
+若直接使用既有模型或快取，須使用相同個體名單、資料前處理及切分所產生的檔案。DTOF 融合需要各 fold 的 Stage 1 描述子；Fine-tuning 另需相同目標與 fold 的 DRS-only baseline checkpoint。
+
+## 使用順序
+
+### 1. 第一階段訓練與描述子匯出
 
 ```bash
 bash scripts/run_stage1_loso.sh
-bash scripts/run_stage2_loso.sh configs/stage2/baseline/hc.yaml
-python scripts/run_remaining_stage2.py --target hc --dry-run
 ```
 
-Stage1會保留已完成模型與匯出；Stage2依CSV／checkpoint續跑。不要在同一輸出目錄同時執行兩個訓練程序。
+此入口執行 136-fold LOSO，並匯出 Stage 2 所需的描述子與測試個體 acquisition embeddings。主要設定為 [`configs/stage1_32.yaml`](configs/stage1_32.yaml)，輸出位於：
 
-## 在另一台電腦使用 Stage2 快取
-
-完整複製 `cache/stage2/` 後，Stage2 訓練不必攜帶原始 DRS `.mat`，也不需新增參數。須保留 validation 的三個 `.npy` 與 metadata，以及目前設定所需的每個 subject／stage 的 compact training `.npy` 與 metadata。兩種目標共用同一份含 tHb／StO₂ 的快取；請維持原 cohort、抽樣與前處理設定，且不要啟用 `rebuild_preprocessed_cache`／`rebuild_compact_cache`。
-
-若快取缺檔或要求重建，程式仍須讀取 `mat_file`；不會跳過缺少的 subject。DTOF 融合另需各 fold 的 Stage1 特徵，fine-tune 另需對應目標的 baseline checkpoint，厚度融合另需 metadata CSV。Stage1 重訓及需要原始 DTOF 的分析仍需原始資料；`data/raw` 的符號連結只在這些情況下才需重新接上。新電腦的正規化紀錄會按現有路徑與快取內容驗證／建立，不依賴原電腦的絕對路徑。
-
-## 目前採用的訓練設定
-
-六組 tHb fine-tune（DTOF／metadata × Concat／FiLM／gated residual）統一採 DRS LR=1e-6、融合 LR=3e-5。使用原本的 `*_hc.yaml`，結果位於各自的 `artifacts/stage2/<fusion>/finetune/<feature>/hc`。舊 fine-tune 結果已移出專案至外部備份；不再保留 `hc_lr3e5` 或同名版本 YAML。
-
-六組 tHb scratch 也統一使用漸進融合：隨機初始化、DRS 與融合 LR皆為1e-4，首一個epoch內 alpha由0升至1。三種方法共用 `h_out=(1-alpha)*h_DRS+alpha*h_fused`；因此FiLM的調變與gated residual的殘差也逐步加入。訓練持續共同更新DRS與融合，驗證／測試一律完整融合。使用各自 `scratch/*_hc.yaml` 與正式hc；舊五組scratch已移出專案外備份。StO₂已同步相同的新LR與漸進scratch策略，詳見下節。
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python -u scripts/run_remaining_stage2.py --target hc
+```text
+artifacts/stage1/<test_id>/relat_cons_32/
+├── best_model.pt
+├── subject_features_all_op.npz
+└── test_acquisition_embeddings.npz
 ```
 
-佇列先確認 baseline，然後跑 DTOF，再跑 metadata；完成設定與完整 folds 自動跳過。加 `--dry-run` 可預覽。更新後僅baseline、DTOF Concat漸進scratch與DTOF Concat新fine-tune已完整完成，初始audit為3complete／10pending。其餘五組scratch與五組fine-tune依DTOF優先、metadata接續；partial fold會重新訓練。
-
-未來額外版本仍可使用 `output_variant` 分開輸出。完整來源、外部備份與模型數值驗證記於 `PROJECT_MANIFEST.json`。
-
-
-## StO₂：另一台電腦接續訓練
-
-六組StO₂ fine-tune（DTOF／metadata × 三種fusion）採融合LR=3e-5、DRS LR=1e-6，不加ramp；六組scratch採兩分支LR=1e-4、首1epoch漸進融合。沿用各自 `*_sto2.yaml` 與正式 `sto2/`，不新增結果版本層。Baseline與共用cache不變。
-
-舊StO₂ Concat fine-tune DTOF136折／metadata98折已移至專案外備份，避免resume誤用舊LR結果。同步當下主要矩陣應為1complete（baseline）／12pending；後續進度以實際audit為準。
+已完成且通過檢查的模型與匯出會保留。若只需要匯出既有模型的描述子，可執行：
 
 ```bash
-python -u scripts/run_remaining_stage2.py --target sto2 --dry-run
+python scripts/run_subject_cohort.py --phase exports --execute
+```
+
+### 2. 第二階段 baseline 與融合實驗
+
+先檢查待執行的實驗，再選擇預測目標：
+
+```bash
+python scripts/run_remaining_stage2.py --dry-run
+python -u scripts/run_remaining_stage2.py --target hc
 python -u scripts/run_remaining_stage2.py --target sto2
 ```
 
-在另一台保留完整程式／configs／metadata／cache，以及 `artifacts/.cohort.json`、Stage1每fold features、`artifacts/stage2/baseline/sto2/`。啟用相容Python環境後從專案根目錄執行。佇列先DTOF、後metadata；baseline136折會跳過。跑完將各fusion／strategy／feature底下的 `sto2/` 連同configs／CSV／checkpoint等結果整個合併回原機，保留原機 `hc/`，且避免兩台同時寫同一結果目錄。
+每個目標包含一組 baseline，以及 DTOF／厚度特徵、三種融合方式與兩種訓練策略的 12 組融合實驗。執行順序為 baseline、DTOF、厚度特徵；完整的 fold 會跳過，未完成的 fold 會重新訓練。同一輸出目錄應由單一訓練程序使用。
 
+單獨執行特定設定時，可使用：
 
-## Stage2 performance table與Fig. 33更新
+```bash
+bash scripts/run_stage2_loso.sh configs/stage2/baseline/hc.yaml
+bash scripts/run_stage2_loso.sh configs/stage2/concatenation/finetune/dtof_hc.yaml
+bash scripts/run_stage2_loso.sh configs/stage2/concatenation/scratch/dtof_hc.yaml
+```
 
-執行 `notebooks/05_stage2_fusion_comparison.ipynb` 會掃描完整136人結果，主表列pooled RMSE、subject RMSE median [Q25, Q75]、平均逐人絕對Bias、平均配對ΔRMSE [95% CI]、改善人數百分比與固定baseline Q1–Q4的平均ΔRMSE。StO₂誤差以percentage points呈現；pooled依實際n_test加權，缺sample count的舊CSV不臆測pooled分數。
+FiLM、Gated residual、厚度特徵及 StO₂ 的設定分別位於對應的 `configs/stage2/<fusion>/<strategy>/` 目錄。各設定直接定義初始化、學習率、融合方式及訓練參數。
 
-原Fig. 33四格個體ΔRMSE圖與fallback預覽已從正常notebook／CLI流程移除；各完整arm的Q統計不再等待兩target的整個融合矩陣完成。既有代表性比較圖保留，舊繪圖helper只留作歷史重現。主表不放p；原配對Wilcoxon、Holm及rank-biserial保留補充數值CSV。5000次固定seed的subject-level配對bootstrap CI為OOF近似，不涵蓋完整重訓、LOSO相依及策略搜尋；矩陣未全完成前p校正仍為暫定，不補舊設定結果。
+| 訓練策略 | DRS 初始化 | DRS 初始 LR | 融合初始 LR | 融合介入方式 |
+| --- | --- | --- | --- | --- |
+| DRS-only baseline | 隨機初始化 | `1e-4` | — | 僅使用 DRS。 |
+| Scratch | 隨機初始化 | `1e-4` | `1e-4` | 首個 epoch 逐步增加融合強度，兩分支共同訓練。 |
+| Fine-tuning | 對應 fold 的 baseline | `1e-6` | `3e-5` | 使用完整融合，微調 DRS 與融合參數。 |
+
+Scratch 的融合強度在首個 epoch 由 0 增至 1，驗證與測試皆使用完整融合。三種融合方式共用此訓練流程；具體參數以所選 YAML 為準。
+
+結果目錄結構為：
+
+```text
+artifacts/stage2/baseline/<target>/
+artifacts/stage2/<fusion>/<strategy>/<feature>/<target>/
+```
+
+其中 `<feature>` 為 `dtof` 或 `metadata`，`<target>` 為 `hc` 或 `sto2`。各實驗包含 `loso_results.csv`、逐 fold checkpoint、設定及預測輸出。
+
+### 3. 使用既有 Stage 2 快取
+
+完整的 `cache/stage2/` 包含 validation 資料及所需的 compact training 子集時，可直接執行第二階段，無須重新讀取原始 DRS MAT。兩種目標共用含 tHb／StO₂ 的快取；請維持相同的個體名單、抽樣及前處理設定。
+
+搬移研究工作目錄時，亦須保留 `artifacts/.cohort.json`、所需的 Stage 1 特徵、baseline 權重及 `data/metadata_aligned.csv`。快取缺檔或啟用重建時仍需要原始資料；Stage 1 訓練及使用原始 DTOF 的分析也需要對應 MAT 檔。
+
+## 結果分析
+
+分析內容依研究問題分工：
+
+| 分析 | 對應 notebook |
+| --- | --- |
+| DTOF 個體差異 | `00_dtof_subject_variation.ipynb` |
+| 個體檢索與表徵分布 | `01_stage1_retrieval.ipynb` |
+| OP 穩健性與 CKA | `02_stage1_op_robustness_cka.ipynb` |
+| 結構厚度 probing | `03_stage1_structure_probe.ipynb` |
+| DRS-only baseline 評估 | `04_stage2_baseline_evaluation.ipynb` |
+| 融合策略與模型效能比較 | `05_stage2_fusion_comparison.ipynb` |
+| 困難個體與光譜分析 | `06_stage2_subject_failure.ipynb` |
+| 未見資料評估 | `07_unseen_dataset_validation.ipynb`、`07_unseen_dataset_validation_sto2.ipynb` |
+| 描述子控制實驗 | `08_stage2_descriptor_controls.ipynb` |
+
+取得 notebook 與必要資料後，建議依編號閱讀。也可直接執行分析模組，例如：
+
+```bash
+python -m subject_nirs.stage2.comparison --root ./artifacts/stage2 --output-dir ./results/tables/stage2/fusion_comparison
+```
+
+第二階段效能主表包含 pooled OOF RMSE、subject RMSE 中位數 [Q25, Q75]、平均逐人絕對 Bias、平均配對 ΔRMSE [95% CI]、改善個體比例，以及依 baseline 難度固定分組的 Q1–Q4 平均 ΔRMSE。ΔRMSE 定義為融合模型減 baseline，負值表示改善；tHb 單位為 μM，StO₂ 誤差以百分點（percentage points）呈現。
+
+配對統計檢定與效果量保留於補充 CSV。CI 使用 subject-level 配對 bootstrap，屬於 OOF 結果的近似描述，並不涵蓋完整重訓、LOSO 訓練集重疊及超參數選擇的不確定性。分析預設採用完整的 LOSO 實驗。
+
+已有 CKA 摘要時，可直接重畫圖，不需重新推論模型：
+
+```bash
+python -m subject_nirs.stage1.cka_plotting --analysis_dir results/tables/stage1/cka_relat_cons_32
+```
+
+自訂輸出位置時，請將 `--analysis_dir` 指向含 `full_cka_summary.h5` 與 transition 摘要表的目錄。

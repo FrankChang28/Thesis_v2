@@ -41,7 +41,7 @@ The thesis table combines pooled OOF RMSE, subject RMSE median [Q25, Q75],
 mean absolute subject bias, mean paired changes with approximate subject-level
 bootstrap intervals, improved-subject percentage, and fixed baseline Q1--Q4
 mean changes. Signed bias, dispersion, and p-values remain in numeric CSVs.
-The former Fig. 33 heterogeneous-benefit figure is no longer generated. The single figure is restricted to one matched
+The representative figure is restricted to one matched
 fusion/training setting (residual + fine-tune by default), so feature-source
 effects are not confounded with the fusion operator.
 """
@@ -461,7 +461,7 @@ def load_experiment(spec: ExperimentSpec) -> tuple[ExperimentMeta, pd.DataFrame]
     )
 
     # Retain the number of test rows for row-weighted pooled OOF RMSE.
-    # Legacy CSVs without counts stay usable, but their pooled score is unknown.
+    # Pooled RMSE is unavailable when the test-row counts are absent.
     if "n_test" in frame:
         tidy["n_test"] = pd.to_numeric(frame["n_test"], errors="coerce")
         counts = tidy["n_test"].to_numpy(dtype=float)
@@ -2199,8 +2199,8 @@ def main() -> int:
         save_pdf=save_pdf,
     )
 
-    # The former Fig. 33 is retired. Difficulty statistics are exported for
-    # every completed arm in the performance table and conditional CSV.
+    # Difficulty statistics for each complete experiment are exported in
+    # the performance table and conditional CSV.
 
     print_console_summary(summary, paired_summary, conditional)
     print(f"\nSaved analysis to: {output_dir}")

@@ -16,7 +16,7 @@ import pandas as pd
 
 
 def plot_fold_tsne(coordinates: pd.DataFrame, selected: pd.Series, subject_id_labels=None):
-    """Preserve the legacy point geometry while clarifying IDs and metrics."""
+    """Plot saved coordinates with split labels, subject IDs, and retrieval metrics."""
     required = {"subject_id", "split", "tsne_1", "tsne_2"}
     missing = required.difference(coordinates.columns)
     if missing:

@@ -68,7 +68,7 @@ def commands(run: Path, phase: str, subject_ids: list[int], dims: list[int]) -> 
         for path in sorted(paths, key=priority):
             result.append([python, str(ROOT / "scripts/train_stage2.py"), "--config", str(path)])
     if phase in ("analysis", "all"):
-        # Notebooks are frozen, outputs cleared, and paths retargeted at preparation.
+        # Execute the analysis notebooks in filename order.
         for notebook in sorted((run / "notebooks").glob("*.ipynb")):
             result.append([python, "-m", "jupyter", "nbconvert", "--execute", "--to", "notebook",
                            "--inplace", "--ExecutePreprocessor.timeout=-1", str(notebook)])
@@ -106,7 +106,7 @@ def export_command(python: str, output: Path, acquisitions: bool) -> list[str]:
 
 
 def child_environment() -> dict[str, str]:
-    # Match the original shell launchers before native libraries are imported.
+    # Set native-library thread limits before child processes import them.
     environment = dict(os.environ, PYTHONPATH=str(ROOT / "src"), MPLBACKEND="Agg",
                        PYTHONUNBUFFERED="1", PYTHONFAULTHANDLER="1")
     for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):

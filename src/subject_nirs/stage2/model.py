@@ -25,9 +25,9 @@ def _group_norm(channels: int) -> nn.GroupNorm:
 class CNN1D(nn.Module):
     """Encode multi-wavelength DRS along the SDS axis and regress one target.
 
-    ``latent_dim`` is retained for backward compatibility with older direct
-    additive-fusion experiments. New experiments should use one of the fusion
-    wrappers created by :func:`build_baseline_fusion_model`.
+    ``latent_dim`` enables an optional additive descriptor path. The configured
+    Concatenation, FiLM, and Gated residual models use the fusion wrappers
+    created by :func:`build_baseline_fusion_model`.
     """
 
     embedding_dim = DRS_EMBEDDING_DIM

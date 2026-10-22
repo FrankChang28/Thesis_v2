@@ -1,4 +1,4 @@
-"""Cohort validation and fresh selected-fold plots for Stage 1 analyses."""
+"""Cohort validation and selected-fold visualization for Stage 1 analyses."""
 from __future__ import annotations
 
 import hashlib
@@ -62,7 +62,7 @@ def analysis_environment(root):
 
 def selected_fold_tsne(result_root, experiment, data_dir, cohort_file, metrics, output_dir,
                        device_name="cpu", samples=50, seed=42):
-    """Fit new coordinates for data-selected folds; never replay legacy geometry."""
+    """Fit or load t-SNE coordinates for folds selected from retrieval metrics."""
     import matplotlib.pyplot as plt
     import pandas as pd
     from sklearn.manifold import TSNE

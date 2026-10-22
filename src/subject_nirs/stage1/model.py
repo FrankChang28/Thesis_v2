@@ -8,8 +8,8 @@ import torch.nn.functional as F
 class DTOFSubjectEncoder(nn.Module):
     """Encode one multi-SDS DTOF acquisition into a unit subject embedding.
 
-    The model deliberately avoids a Transformer. Every SDS curve is processed by
-    the same temporal CNN, its relative integrated area is appended, and the SDS
+    Each SDS curve is processed by the same temporal CNN, its relative
+    integrated area is appended, and the SDS
     features are concatenated in their fixed acquisition order before a small MLP.
     The fixed concatenation order already identifies each SDS channel.
     """

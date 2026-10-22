@@ -145,7 +145,7 @@ def completed_test_ids(
 
     A fold is complete only when its global fold number is correct, test loss is
     finite, and the recorded best-model file exists. Truncated, duplicate, or
-    old mis-numbered rows are removed after a one-time backup.
+    incorrectly numbered rows are removed after a one-time backup.
     """
     if not os.path.exists(results_path) or os.path.getsize(results_path) == 0:
         if os.path.exists(results_path):
@@ -175,9 +175,8 @@ def completed_test_ids(
             continue
         model_exists = os.path.isfile(model_path)
         if not model_exists:
-            # Artifact directories may be reorganized without rewriting the
-            # immutable historical CSV. Check the current experiment directory
-            # for the recorded checkpoint basename before rejecting the fold.
+            # Resolve a checkpoint by basename within the current experiment
+            # directory when its recorded path points to another location.
             relocated_model_path = Path(results_path).parent / Path(model_path).name
             model_exists = relocated_model_path.is_file()
         if not model_exists:
@@ -212,9 +211,14 @@ def retain_completed_epoch_rows(path: str, completed: set[int]) -> None:
     if not os.path.exists(path):
         return
     with open(path, "r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        fieldnames = reader.fieldnames
-        rows = list(reader)
+        lines = handle.readlines()
+    if lines and "\x00" in lines[0]:
+        raise ValueError(f"Epoch-log header contains NUL bytes: {path}")
+    damaged_lines = sum("\x00" in line for line in lines)
+    # Discard damaged records, never concatenate numeric fields across NULs.
+    reader = csv.DictReader(line for line in lines if "\x00" not in line)
+    fieldnames = reader.fieldnames
+    rows = list(reader)
     retained = []
     for row in rows:
         try:
@@ -222,9 +226,19 @@ def retain_completed_epoch_rows(path: str, completed: set[int]) -> None:
                 retained.append(row)
         except (KeyError, TypeError, ValueError):
             continue
-    if len(retained) == len(rows):
+    if len(retained) == len(rows) and not damaged_lines:
         return
     _backup_once(path)
+    if damaged_lines:
+        source = Path(path)
+        backup = source.with_name(
+            f"{source.stem}.nul_backup_{time.time_ns()}{source.suffix}"
+        )
+        shutil.copy2(source, backup)
+        print(
+            f"Resume audit: discarded {damaged_lines} NUL-damaged epoch-log "
+            f"line(s); original saved to {backup}"
+        )
     if retained and fieldnames:
         temporary = f"{path}.resume_tmp"
         with open(temporary, "w", newline="", encoding="utf-8") as handle:

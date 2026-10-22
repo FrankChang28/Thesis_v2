@@ -118,7 +118,7 @@ class Config:
 
     # Fusion adapters and scratch baselines use the primary learning rate.
     learning_rate: float = 1e-4
-    # Scratch Concat curriculum; zero preserves the original training.
+    # Epochs for ramping fusion strength from zero to one; zero disables ramping.
     fusion_ramp_epochs: int = 0
     output_variant: str = ""
     min_learning_rate: float = 1e-6
