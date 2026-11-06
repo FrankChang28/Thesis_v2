@@ -21,11 +21,6 @@ dependencies = [
 
 [project.optional-dependencies]
 notebook = ["ipykernel>=6.25", "jupyterlab>=4.0", "seaborn>=0.12"]
-test = ["pytest>=7.4"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]

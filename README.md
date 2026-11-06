@@ -20,23 +20,20 @@
 | `data/` | 原始 DTOF、DRS 與已對齊的組織厚度資料。 |
 | `src/subject_nirs/stage1/` | DTOF 表徵學習、描述子匯出及第一階段分析。 |
 | `src/subject_nirs/stage2/` | DRS 預測、特徵融合、LOSO 訓練及第二階段分析。 |
-| `scripts/` | 訓練、匯出、續跑與基本檢查的執行入口。 |
+| `scripts/` | 訓練、匯出與續跑的執行入口。 |
 | `notebooks/` | 依論文分析順序整理的圖表與結果檢視。 |
 | `artifacts/` | 模型權重、逐折設定及測試預測。 |
 | `cache/` | 前處理資料與各訓練折的正規化紀錄。 |
 | `results/tables/`、`results/figures/` | 分析表格與圖檔。 |
-| `tests/` | 設定、切分、模型及結果處理的測試。 |
 
-版本控制提供程式、設定與測試；研究資料、快取、模型、notebook 與結果另行準備。上表也列出完整研究工作目錄中使用的分析與輸出位置。Notebook 負責串接分析與展示，主要計算及繪圖邏輯位於 `src/`。
+版本控制提供程式與設定；研究資料、快取、模型、notebook 與結果另行準備。上表也列出完整研究工作目錄中使用的分析與輸出位置。Notebook 負責串接分析與展示，主要計算及繪圖邏輯位於 `src/`。
 
-## 安裝與確認
+## 安裝
 
-訓練流程使用 Linux、Python 3.10 以上版本及 PyTorch。請依本機 GPU／CUDA 環境安裝適合的 PyTorch，再安裝專案與分析、測試依賴：
+訓練流程使用 Linux、Python 3.10 以上版本及 PyTorch。請依本機 GPU／CUDA 環境安裝適合的 PyTorch，再安裝專案與分析依賴：
 
 ```bash
-python -m pip install -e ".[notebook,test]"
-python scripts/smoke_test.py
-pytest -q
+python -m pip install -e ".[notebook]"
 ```
 
 亦可使用既有 Conda 環境。Shell 執行入口可透過 `SUBJECT_NIRS_PYTHON` 指定 Python；GPU 可透過 `CUDA_VISIBLE_DEVICES` 選擇。
@@ -57,6 +54,14 @@ data/
 ```
 
 `metadata_aligned.csv` 的資料列須與原始 subject ID 對齊；Stage 2 的厚度特徵讀取第 6–9 欄（Python 切片 `5:9`）。輸入／輸出路徑與實驗參數均由 `configs/` 中的 YAML 管理。程式中的目標名稱 `hc` 對應 tHb，`sto2` 對應 StO₂。
+
+訓練前須建立個體名單標記；Stage 1 與 Stage 2 都會檢查，缺少時會回報 `Output root requires a matching .cohort.json marker`。指紋須與 `configs/stage1_32.yaml` 的 `cohort_fingerprint` 相同：
+
+```bash
+mkdir -p artifacts cache
+echo '{"fingerprint": "01deae79e5b1d272"}' > artifacts/.cohort.json
+cp artifacts/.cohort.json cache/.cohort.json
+```
 
 若直接使用既有模型或快取，須使用相同個體名單、資料前處理及切分所產生的檔案。DTOF 融合需要各 fold 的 Stage 1 描述子；Fine-tuning 另需相同目標與 fold 的 DRS-only baseline checkpoint。
 
