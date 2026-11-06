@@ -35,10 +35,13 @@ Outputs
 - conditional_effect_by_baseline_difficulty.csv
 - final_experiment_table.csv
 - final_experiment_table_formatted.csv
+- thesis_performance_table.csv
+- thesis_performance_table_hc.csv / thesis_performance_table_sto2.csv
+- thesis_performance_table_notes.json
 - representative_loso_comparison.png
 
-The thesis table combines pooled OOF RMSE, subject RMSE median [Q25, Q75],
-mean absolute subject bias, mean paired changes with approximate subject-level
+The thesis table reports subject RMSE median [Q25, Q75],
+mean absolute subject bias (MAB), mean paired changes with approximate subject-level
 bootstrap intervals, improved-subject percentage, and fixed baseline Q1--Q4
 mean changes. Signed bias, dispersion, and p-values remain in numeric CSVs.
 The representative figure is restricted to one matched
@@ -460,8 +463,7 @@ def load_experiment(spec: ExperimentSpec) -> tuple[ExperimentMeta, pd.DataFrame]
         }
     )
 
-    # Retain the number of test rows for row-weighted pooled OOF RMSE.
-    # Pooled RMSE is unavailable when the test-row counts are absent.
+    # Preserve test-row counts as sample metadata when available.
     if "n_test" in frame:
         tidy["n_test"] = pd.to_numeric(frame["n_test"], errors="coerce")
         counts = tidy["n_test"].to_numpy(dtype=float)
@@ -470,7 +472,6 @@ def load_experiment(spec: ExperimentSpec) -> tuple[ExperimentMeta, pd.DataFrame]
             raise ValueError(f"{csv_path}: n_test must contain positive integer row counts")
     else:
         tidy["n_test"] = np.nan
-        print(f"WARNING: {csv_path}: missing n_test; pooled RMSE is unavailable.", file=sys.stderr)
 
     for metric in METRICS:
         col = metric_column(frame, target_name, metric)
@@ -718,14 +719,6 @@ def build_final_experiment_table(
     for (target, experiment), group in frame.groupby(["target", "experiment"], sort=False):
         rmse = group["RMSE"].dropna()
         bias = group["Bias"].dropna()
-        counts = pd.to_numeric(
-            group.get("n_test", pd.Series(np.nan, index=group.index)), errors="coerce"
-        ).to_numpy(dtype=float)
-        pooled_rmse = np.nan
-        if np.isfinite(counts).all():
-            if not ((counts > 0).all() and (counts == np.floor(counts)).all()):
-                raise ValueError("Pooled RMSE requires positive integer test-row counts")
-            pooled_rmse = float(np.sqrt(np.average(group["RMSE"].to_numpy(dtype=float) ** 2, weights=counts)))
         first = group.iloc[0]
         row: dict[str, object] = {
             "target": target,
@@ -734,7 +727,6 @@ def build_final_experiment_table(
             "training_strategy": first["training_strategy"],
             "experiment": experiment,
             "n_subjects": int(group["subject_id"].nunique()),
-            "pooled_rmse": pooled_rmse,
             "rmse_mean": float(rmse.mean()),
             "mean_absolute_subject_bias": float(bias.abs().mean()),
             "delta_rmse_mean": np.nan,
@@ -827,9 +819,6 @@ def format_final_experiment_table(table: pd.DataFrame) -> pd.DataFrame:
     formatted["error unit"] = table["target"].map(
         lambda target: "pp" if target == "sto2" else target_error_unit(target)
     )
-    formatted["Pooled RMSE"] = table["pooled_rmse"].map(
-        lambda value: "—" if pd.isna(value) else f"{value:.3f}"
-    )
     formatted["Subject RMSE median [Q25, Q75]"] = table.apply(
         lambda row: f"{row.rmse_median:.3f} [{row.rmse_q1:.3f}, {row.rmse_q3:.3f}]", axis=1
     )
@@ -848,6 +837,67 @@ def format_final_experiment_table(table: pd.DataFrame) -> pd.DataFrame:
         formatted[f"{quartile} mean ΔRMSE"] = table[f"{quartile.lower()}_mean_delta_rmse"].map(
             lambda value: "—" if pd.isna(value) else f"{value:+.3f}"
         )
+    return formatted
+
+
+def format_thesis_performance_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Select thesis columns without changing the underlying subject statistics."""
+    formatted = format_final_experiment_table(table).rename(columns={
+        "target": "Target", "feature_source": "Feature",
+        "training_strategy": "Training", "fusion_method": "Fusion", "n_subjects": "N",
+        "Subject RMSE median [Q25, Q75]": "RMSE, median [IQR]",
+        "Mean absolute subject Bias": "MAB",
+        "Improved subjects (%)": "Improved (%)",
+    })
+    formatted["Target"] = formatted["Target"] + " (" + formatted["error unit"] + ")"
+    baseline = table["feature_source"].eq("baseline")
+    formatted.loc[baseline, ["Feature", "Training", "Fusion"]] = ["Baseline", "—", "DRS-only"]
+    formatted.loc[table["feature_source"].eq("metadata"), "Feature"] = "Layer thickness"
+    columns = ["Target", "Feature", "Training", "Fusion", "N",
+               "RMSE, median [IQR]", "MAB", "Mean paired ΔRMSE [95% CI]", "Improved (%)",
+               *[f"{q} mean ΔRMSE" for q in DIFFICULTY_ORDER]]
+    # Keep each training strategy together, as in the thesis experiment matrix.
+    order = pd.DataFrame({
+        "target": table["target"].map({"hc": 0, "sto2": 1}).fillna(9),
+        "source": table["feature_source"].map({"baseline": 0, "latent": 1, "metadata": 2}).fillna(9),
+        "strategy": table["training_strategy"].map({"scratch": 0, "finetune": 1}).fillna(9),
+        "method": table["fusion_method"].map({"none": 0, "concatenation": 1, "film": 2, "residual": 3}).fillna(9),
+    }).sort_values(["target", "source", "strategy", "method"], kind="stable").index
+    return formatted.loc[order, columns].reset_index(drop=True)
+
+
+def export_thesis_performance_tables(
+    table: pd.DataFrame, output_dir: Path, expected_subjects: int,
+) -> pd.DataFrame:
+    """Export one combined thesis CSV and one compact CSV per available target."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    formatted = format_thesis_performance_table(table)
+    formatted.to_csv(output_dir / "thesis_performance_table.csv", index=False, encoding="utf-8-sig")
+    for target in table["target"].drop_duplicates():
+        unit = "pp" if target == "sto2" else target_error_unit(target)
+        label = f"{TARGET_DISPLAY[target]} ({unit})"
+        formatted.loc[formatted["Target"].eq(label)].drop(columns="Target").to_csv(
+            output_dir / f"thesis_performance_table_{target}.csv", index=False, encoding="utf-8-sig"
+        )
+    notes = {
+        "expected_subjects": expected_subjects,
+        "units": {"hc": "μM", "sto2": "percentage points (pp)"},
+        "RMSE, median [IQR]": "先算各測試個體RMSE，再列跨個體中位數及第25、75百分位；方括號不是CI。",
+        "MAB": "Mean absolute bias：先算每人的平均預測誤差、取絕對值，再跨個體平均；不是逐筆MAE。",
+        "Mean paired ΔRMSE [95% CI]": "同一個體的融合RMSE減baseline RMSE，再跨個體平均；負值表示改善。CI沿用固定seed、5000次個體配對bootstrap近似，不涵蓋重訓或選模。",
+        "Improved (%)": "配對ΔRMSE小於0的個體比例，不是相對誤差降幅。",
+        "Q1–Q4": "各目標依同一baseline RMSE由低到高固定分四組；欄位為組內平均配對ΔRMSE，136人時各組34人。這與IQR的百分位不同。",
+        "scope": "正常CLI只納完整個體結果；未完成組預設略過。資料筆數與配對人數留在數值主檔。",
+        "supplementary_statistics": "paired_vs_baseline.csv及final_experiment_table.csv保留p、Holm與rank-biserial；每個目標12組正式融合比較未全完成前，校正結果仍屬暫定。",
+        "available_fusion_comparisons": {
+            target: int(((table["target"] == target) & table["n_paired_subjects"].notna()).sum())
+            for target in table["target"].drop_duplicates()
+        },
+    }
+    (output_dir / "thesis_performance_table_notes.json").write_text(
+        json.dumps(notes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     return formatted
 
 
@@ -2151,6 +2201,7 @@ def main() -> int:
         index=False,
         encoding="utf-8-sig",
     )
+    export_thesis_performance_tables(final_table, output_dir, args.expected_subjects)
 
     relative = relative_metric_table(all_results, args.baseline_label)
     if not relative.empty:

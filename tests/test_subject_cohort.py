@@ -178,11 +178,6 @@ def test_preparation_retargets_every_config_and_notebook(tmp_path, monkeypatch):
                 assert "EXPECTED_SUBJECTS = 154" not in source
                 assert "Path('artifacts/stage" not in source
     assert (run / "notebooks/07_unseen_dataset_validation_sto2.ipynb").is_file()
-    runner = load_script("run_subject_cohort")
-    monkeypatch.setattr(runner, "ROOT", root)
-    queue = runner.commands(run, "all", cohort.subject_ids, [32])
-    assert len(queue) == 140 * 2 + len(configs) + len(list((run / "notebooks").glob("*.ipynb")))
-    assert all(str(root) in " ".join(command) for command in queue)
     assert module.prepare(root, path) == run
 
 

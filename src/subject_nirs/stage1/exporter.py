@@ -22,7 +22,7 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
-from .data import load_data_bundle
+from .data import PREPROCESS_VERSION, load_data_bundle
 from ..common.cohort import cohort_from_args, check_partition
 from .metrics import collect_embeddings
 from .model import DTOFSubjectEncoder
@@ -284,6 +284,9 @@ def main(args: argparse.Namespace) -> None:
         raise KeyError(
             f"Checkpoint is missing required keys: {missing_keys}"
         )
+
+    if checkpoint.get("preprocess_stats", {}).get("dtof_preprocess") != PREPROCESS_VERSION:
+        raise ValueError(f"Checkpoint DTOF preprocessing is not {PREPROCESS_VERSION}; retrain Stage 1")
 
     train_args = _as_dict(checkpoint["args"])
     train_args["data_dir"] = args.data_dir

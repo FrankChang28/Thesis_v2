@@ -142,6 +142,11 @@ def main() -> None:
             "min_checkpoint_epoch": int(args.min_checkpoint_epoch),
             "patience": int(args.patience),
             "min_delta": 1e-4,
+            "validation_at_best_epoch": {
+                key: float(values[best_epoch])
+                for key, values in history.items()
+                if key.startswith("val_")
+            },
         },
         "split_metrics": split_metrics,
         "global_gallery_metrics": global_metrics,

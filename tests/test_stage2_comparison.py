@@ -7,6 +7,8 @@ from subject_nirs.stage2.comparison import (
     build_heterogeneous_benefit_detail,
     build_final_experiment_table,
     format_final_experiment_table,
+    format_thesis_performance_table,
+    export_thesis_performance_tables,
     heterogeneous_benefit_missing_cells,
     holm_adjust,
     paired_comparisons,
@@ -116,7 +118,7 @@ def test_final_table_contains_requested_statistics() -> None:
     assert fusion["delta_rmse_q3"] == -0.25
     assert fusion["improved_subjects_pct"] == 75.0
     assert "Subject RMSE median [Q25, Q75]" in formatted.columns
-    assert "Pooled RMSE" in formatted.columns
+    assert "Pooled RMSE" not in formatted.columns
     assert "Q4 mean ΔRMSE" in formatted.columns
     assert "Holm-adjusted p" not in formatted.columns
     assert "wilcoxon_p_holm" in table.columns
@@ -190,7 +192,7 @@ if __name__ == "__main__":
     print("stage2 comparison tests passed")
 
 
-def test_performance_table_weights_rows_and_keeps_subject_pairing():
+def test_performance_table_uses_subject_median_and_keeps_subject_pairing():
     frame = _frame()
     frame["n_test"] = frame["subject_id"].map({1: 10, 2: 20, 3: 30, 4: 40})
     frame.loc[(frame["feature_source"] == "latent") & (frame["subject_id"] == 3), "RMSE"] = 6.5
@@ -198,8 +200,12 @@ def test_performance_table_weights_rows_and_keeps_subject_pairing():
     table = build_final_experiment_table(frame, paired)
     baseline = table[table["feature_source"] == "baseline"].iloc[0]
     fusion = table[table["feature_source"] == "latent"].iloc[0]
-    np.testing.assert_allclose(baseline.pooled_rmse, np.sqrt(26.0))
-    np.testing.assert_allclose(fusion.pooled_rmse, np.sqrt(21.925))
+    assert baseline.rmse_median == 4.5
+    assert fusion.rmse_median == 3.75
+    assert fusion.rmse_mean == 4.0
+    assert "pooled_rmse" not in table.columns
+    different_counts = frame.assign(n_test=frame["subject_id"].map({1: 9999, 2: 1, 3: 1, 4: 1}))
+    pd.testing.assert_frame_equal(table, build_final_experiment_table(different_counts, paired))
     assert fusion.delta_rmse_mean == -0.5
     assert fusion.delta_rmse_median == -0.75
     np.testing.assert_allclose(fusion.mean_absolute_subject_bias, 0.0875)
@@ -214,12 +220,13 @@ def test_performance_table_weights_rows_and_keeps_subject_pairing():
     pd.testing.assert_frame_equal(table, repeated)
 
 
-def test_missing_test_counts_do_not_invent_a_pooled_score():
+def test_subject_median_does_not_require_test_row_counts():
     frame = _frame()
     _, paired = paired_comparisons(frame, "DRS-only baseline")
     table = build_final_experiment_table(frame, paired)
-    assert table.pooled_rmse.isna().all()
-    assert format_final_experiment_table(table)["Pooled RMSE"].eq("—").all()
+    assert table.loc[table.feature_source == "baseline", "rmse_median"].item() == 4.5
+    assert table.loc[table.feature_source == "latent", "rmse_median"].item() == 3.75
+    assert "Pooled RMSE" not in format_final_experiment_table(table).columns
 
 
 def test_baseline_only_table_has_no_paired_claims():
@@ -232,3 +239,51 @@ def test_baseline_only_table_has_no_paired_claims():
     assert table.delta_rmse_mean.isna().all()
     assert formatted["Mean paired ΔRMSE [95% CI]"].eq("—").all()
     assert formatted["Q4 mean ΔRMSE"].eq("—").all()
+
+
+def test_thesis_table_preserves_metrics_and_uses_final_columns():
+    frame = _frame()
+    _, paired = paired_comparisons(frame, "DRS-only baseline")
+    table = build_final_experiment_table(frame, paired)
+    thesis = format_thesis_performance_table(table)
+    assert list(thesis.columns) == [
+        "Target", "Feature", "Training", "Fusion", "N", "RMSE, median [IQR]", "MAB",
+        "Mean paired ΔRMSE [95% CI]", "Improved (%)", "Q1 mean ΔRMSE",
+        "Q2 mean ΔRMSE", "Q3 mean ΔRMSE", "Q4 mean ΔRMSE",
+    ]
+    baseline = thesis.iloc[0]
+    assert (baseline.Target, baseline.Feature, baseline.Training, baseline.Fusion) == (
+        "tHb (μM)", "Baseline", "—", "DRS-only"
+    )
+    assert baseline["RMSE, median [IQR]"] == "4.500 [3.750, 5.250]"
+    assert baseline.MAB == "0.175"
+    assert baseline["Mean paired ΔRMSE [95% CI]"] == "—"
+    fusion = thesis.iloc[1]
+    assert fusion.MAB == "0.088"  # mean |Bias|, not |mean Bias| or MAE
+    assert fusion["Improved (%)"] == "75.0"
+    assert all(fusion[q + " mean ΔRMSE"] != "—" for q in ("Q1", "Q2", "Q3", "Q4"))
+
+
+def test_thesis_csv_exports_both_targets_without_rescaling(tmp_path):
+    import json
+    frame = _complete_heterogeneity_frame(methods=("concatenation", "residual"))
+    _, paired = paired_comparisons(frame, "DRS-only baseline")
+    table = build_final_experiment_table(frame, paired)
+    combined = export_thesis_performance_tables(table, tmp_path, expected_subjects=8)
+    pd.testing.assert_frame_equal(
+        pd.read_csv(tmp_path / "thesis_performance_table.csv", dtype=str, keep_default_na=False),
+        combined.astype(str),
+    )
+    for target, label in [("hc", "tHb (μM)"), ("sto2", "StO₂ (pp)")]:
+        exported = pd.read_csv(tmp_path / f"thesis_performance_table_{target}.csv", dtype=str, keep_default_na=False)
+        expected = combined.loc[combined.Target == label].drop(columns="Target").reset_index(drop=True).astype(str)
+        pd.testing.assert_frame_equal(exported, expected)
+        assert exported.iloc[0].Fusion == "DRS-only"
+        for feature in ["DTOF descriptor", "Layer thickness"]:
+            strategies = exported.loc[exported.Feature == feature, "Training"].tolist()
+            assert strategies == ["Scratch", "Scratch", "Fine-tuning", "Fine-tuning"]
+    sto2 = combined.loc[combined.Target == "StO₂ (pp)"].iloc[0]
+    assert sto2["RMSE, median [IQR]"].startswith("5.500")  # tidy input is already in pp
+    notes = json.loads((tmp_path / "thesis_performance_table_notes.json").read_text())
+    assert notes["units"]["sto2"] == "percentage points (pp)"
+    assert notes["available_fusion_comparisons"] == {"hc": 8, "sto2": 8}

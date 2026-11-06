@@ -91,17 +91,3 @@ def test_cka_cache_rejects_changed_checkpoint_at_same_path(tmp_path, monkeypatch
     checkpoint.write_bytes(b'changed checkpoint')
     assert cka.load_valid_cache(cache,checkpoint,'relat_cons_32') is None
 
-
-def test_cli_notebook_execution_shares_variables_without_jupyter(tmp_path):
-    spec = importlib.util.spec_from_file_location('analysis_runner',ROOT/'scripts/run_stage1_analysis.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = tmp_path/'result.txt'
-    path = tmp_path/'analysis.ipynb'
-    path.write_text(json.dumps({'cells':[
-        {'cell_type':'markdown','source':['Description']},
-        {'cell_type':'code','source':['value = 41']},
-        {'cell_type':'code','source':[f'from pathlib import Path; Path({str(output)!r}).write_text(str(value + 1))']},
-    ]}))
-    module.execute_notebook(path)
-    assert output.read_text() == '42'

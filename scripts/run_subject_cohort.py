@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
-"""Print or execute a prepared cohort's experiment sequence; dry-run by default."""
+"""Stage 1 LOSO training and descriptor export for the fixed cohort; dry-run by default."""
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from subject_nirs.common.cohort import load_cohort
+from subject_nirs.common.cohort import check_partition, load_cohort
 from subject_nirs.common.config import load_yaml
 
-def exports_complete(output: Path, acquisitions: bool) -> bool:
-    paths = [output / "subject_features_all_op.npz"]
-    if acquisitions:
-        paths.append(output / "test_acquisition_embeddings.npz")
+COHORT_FILE = ROOT / "configs/subject_cohort.json"
 
-    for path in paths:
+
+def exports_complete(output: Path) -> bool:
+    for path in (output / "subject_features_all_op.npz", output / "test_acquisition_embeddings.npz"):
         if not path.is_file():
             return False
         try:
@@ -32,58 +32,16 @@ def exports_complete(output: Path, acquisitions: bool) -> bool:
             return False
     return True
 
-def commands(run: Path, phase: str, subject_ids: list[int], dims: list[int]) -> list[list[str]]:
-    artifacts = ROOT / "artifacts" if run == ROOT else ROOT / "artifacts" / run.name
-    configs = run / "configs"
-    python = sys.executable
-    result = []
-    if phase in ("stage1", "all"):
-        for dim in dims:
-            for sid in subject_ids:
-                output = artifacts / "stage1" / str(sid) / f"relat_cons_{dim}"
-                if stage1_complete(output, run, sid):
-                    print(f"Stage 1 test_id={sid} dim={dim}: complete, retaining checkpoint")
-                else:
-                    result.append([python, str(ROOT / "scripts/train_stage1.py"), "--config",
-                                   str(configs / f"stage1_{dim}.yaml"), "--test_id", str(sid),
-                                   "--output_dir", str(output), "--amp", "--skip_tsne"])
-                if exports_complete(output, acquisitions=(dim == 32)):
-                    print(f"Stage 1 test_id={sid} dim={dim}: exports complete, skipping")
-                else:
-                    result.append(export_command(python, output, acquisitions=(dim == 32)))
-                
-    if phase == "exports":
-        for sid in subject_ids:
-            output = artifacts / "stage1" / str(sid) / "relat_cons_32"
-            if exports_complete(output, acquisitions=True):
-                print(f"Stage 1 test_id={sid}: exports complete, skipping")
-            else:
-                result.append(export_command(python, output, acquisitions=True))
-    if phase in ("stage2", "all"):
-        paths = list((configs / "stage2").rglob("*.yaml"))
-        def priority(path):
-            values = load_yaml(path)
-            return (0 if values.get("experiment_mode") == "baseline" else
-                    2 if values.get("execution_mode") == "descriptor_control" else 1, str(path))
-        for path in sorted(paths, key=priority):
-            result.append([python, str(ROOT / "scripts/train_stage2.py"), "--config", str(path)])
-    if phase in ("analysis", "all"):
-        # Execute the analysis notebooks in filename order.
-        for notebook in sorted((run / "notebooks").glob("*.ipynb")):
-            result.append([python, "-m", "jupyter", "nbconvert", "--execute", "--to", "notebook",
-                           "--inplace", "--ExecutePreprocessor.timeout=-1", str(notebook)])
-    return result
 
-
-def stage1_complete(output: Path, run: Path, sid: int) -> bool:
+def stage1_complete(output: Path, cohort, sid: int) -> bool:
     path = output / "best_model.pt"
     if not path.exists():
         return False
     import torch
-    from subject_nirs.common.cohort import check_partition
+    from subject_nirs.stage1.data import PREPROCESS_VERSION
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    cohort = load_cohort(ROOT / "configs/subject_cohort.json" if run == ROOT else run / "cohort.json",
-                         expected_fingerprint=None if run == ROOT else run.name)
+    if checkpoint["preprocess_stats"].get("dtof_preprocess") != PREPROCESS_VERSION:
+        raise ValueError(f"{path} uses older DTOF preprocessing; move that output directory aside first")
     if checkpoint.get("cohort", {}).get("fingerprint") != cohort.fingerprint:
         raise ValueError(f"Existing Stage 1 checkpoint belongs to another cohort: {path}")
     check_partition(cohort, checkpoint["train_subjects"], checkpoint["val_subjects"], checkpoint["test_subjects"])
@@ -94,15 +52,31 @@ def stage1_complete(output: Path, run: Path, sid: int) -> bool:
     return True
 
 
-def export_command(python: str, output: Path, acquisitions: bool) -> list[str]:
-    command = [python, str(ROOT / "scripts/export_subject_features.py"),
-               "--checkpoint", str(output / "best_model.pt"),
-               "--data_dir", str(ROOT / "data/raw/stage1"),
-               "--save_path", str(output / "subject_features_all_op.npz"), "--amp"]
-    if acquisitions:
-        command.extend(["--test_acquisition_save_path", str(output / "test_acquisition_embeddings.npz")])
-    return command
+def export_command(python: str, output: Path) -> list[str]:
+    return [python, str(ROOT / "scripts/export_subject_features.py"),
+            "--checkpoint", str(output / "best_model.pt"),
+            "--data_dir", str(ROOT / "data/raw/stage1"),
+            "--save_path", str(output / "subject_features_all_op.npz"),
+            "--test_acquisition_save_path", str(output / "test_acquisition_embeddings.npz"), "--amp"]
 
+
+def commands(config: Path, phase: str, cohort, subject_ids: list[int]) -> list[list[str]]:
+    experiment = load_yaml(config)["experiment_name"]
+    python = sys.executable
+    result = []
+    for sid in subject_ids:
+        output = ROOT / "artifacts/stage1" / str(sid) / experiment
+        train = phase == "stage1" and not stage1_complete(output, cohort, sid)
+        if train:
+            result.append([python, str(ROOT / "scripts/train_stage1.py"), "--config", str(config),
+                           "--test_id", str(sid), "--output_dir", str(output), "--amp", "--skip_tsne"])
+        elif phase == "stage1":
+            print(f"Stage 1 test_id={sid} {experiment}: complete, retaining checkpoint")
+        if not train and exports_complete(output):
+            print(f"Stage 1 test_id={sid} {experiment}: exports complete, skipping")
+        else:
+            result.append(export_command(python, output))
+    return result
 
 
 def child_environment() -> dict[str, str]:
@@ -131,39 +105,57 @@ def run_logged(command: list[str], environment: dict[str, str], log_path: Path) 
             raise subprocess.CalledProcessError(returncode, command)
 
 
+def is_export(command: list[str]) -> bool:
+    # Every queued fold ends with exactly one export, so a finished export is a finished fold.
+    return Path(command[1]).name == "export_subject_features.py"
+
+
+def format_duration(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    return f"{minutes // 60}h{minutes % 60:02d}m"
+
+
+def progress_line(done: int, total: int, elapsed: float, now: datetime) -> str:
+    """Estimate the remaining time from the mean duration of the folds finished in this run."""
+    average = elapsed / done
+    remaining = average * (total - done)
+    finish = now + timedelta(seconds=remaining)
+    return (f"[Progress] {done}/{total} folds | elapsed {format_duration(elapsed)} | "
+            f"{average / 60:.1f} min/fold | remaining {format_duration(remaining)} | "
+            f"finish {finish:%m-%d %H:%M}")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run", type=Path, help="Prepared runs/<fingerprint> directory")
-    parser.add_argument("--phase", choices=("stage1", "exports", "stage2", "analysis", "all"), default="all")
-    parser.add_argument("--stage1-dim", choices=("32", "16", "both"), default="32")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=ROOT / "configs/stage1_32.yaml",
+                        help="Stage 1 YAML; its experiment_name names the per-fold output directory")
+    parser.add_argument("--phase", choices=("stage1", "exports"), default="stage1",
+                        help="stage1 trains missing folds and exports; exports only exports")
     parser.add_argument("--test-id", type=int, action="append", help="Original zero-based Stage 1 ID; can repeat")
-    parser.add_argument("--execute", action="store_true", help="Explicitly start training/analysis")
+    parser.add_argument("--execute", action="store_true", help="Explicitly start training/export")
     args = parser.parse_args()
-    if args.run:
-        run = args.run.resolve()
-    else:
-        run = ROOT
-    cohort = load_cohort(ROOT / "configs/subject_cohort.json" if run == ROOT else run / "cohort.json",
-                         require_confirmed=True, expected_fingerprint=None if run == ROOT else run.name)
-    if run != ROOT and not run.is_relative_to(ROOT / "runs"):
-        parser.error("--run must refer to this project's prepared runs directory")
-    if args.test_id and args.phase not in ("stage1", "exports"):
-        parser.error("--test-id is supported for Stage 1/exports only; Stage 2 subsets use a prepared YAML copy")
+    config = args.config.resolve()
+    cohort = load_cohort(COHORT_FILE, require_confirmed=True)
     subject_ids = args.test_id or cohort.subject_ids
     if not set(subject_ids).issubset(cohort.subject_ids):
         parser.error("Requested ID is excluded or unknown")
-    dims = [32, 16] if args.stage1_dim == "both" else [int(args.stage1_dim)]
-    queue = commands(run, args.phase, subject_ids, dims)
-    print(f"Cohort {run.name}: {len(cohort.subject_ids)} subjects; {len(queue)} commands; execute={args.execute}")
+    queue = commands(config, args.phase, cohort, subject_ids)
+    print(f"{config.name}: {len(subject_ids)} folds; {len(queue)} commands; execute={args.execute}")
     environment = child_environment()
     session = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    total_folds = sum(map(is_export, queue))
+    finished_folds = 0
+    started = time.monotonic()
     for index, command in enumerate(queue, start=1):
         print(shlex.join(command), flush=True)
         if args.execute:
-            log_dir = ROOT / "results/logs/training" if run == ROOT else run / "logs"
+            log_dir = ROOT / "results/logs/training"
             log_dir.mkdir(parents=True, exist_ok=True)
-            log_path = log_dir / f"{session}_{args.phase}_{index:04d}.log"
-            run_logged(command, environment, log_path)
+            run_logged(command, environment, log_dir / f"{session}_{config.stem}_{args.phase}_{index:04d}.log")
+            if is_export(command):
+                finished_folds += 1
+                print(progress_line(finished_folds, total_folds, time.monotonic() - started, datetime.now()),
+                      flush=True)
 
 
 if __name__ == "__main__":

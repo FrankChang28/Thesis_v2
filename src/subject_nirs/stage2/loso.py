@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import shutil
 import time
@@ -32,7 +33,7 @@ from .engine import (
     save_predictions_npz,
     train_one_epoch,
 )
-from .latent import load_structure_bank
+from .latent import load_structure_bank, resolve_structure_path
 from .model import CNN1D, build_baseline_fusion_model
 from .sampling import fixed_subject_ranges
 from .selection import ValidationSelection, check_selection_namespace, make_baseline_candidate
@@ -248,6 +249,25 @@ def retain_completed_epoch_rows(path: str, completed: set[int]) -> None:
         os.replace(temporary, path)
     else:
         os.remove(path)
+
+
+def fold_config_path_for(fold_idx: int, test_id: int) -> str:
+    return os.path.join(CFG.output_dir, "configs", f"config_fold_{fold_idx:03d}_test_id_{test_id}.json")
+
+
+def tracks_descriptor_file() -> bool:
+    return CFG.use_structure_features and CFG.subject_feature_source == "dtof"
+
+
+def check_completed_descriptors(fold_idx: int, test_id: int) -> None:
+    """A completed DTOF fold is reused only if its Stage 1 descriptor file is unchanged."""
+    with open(fold_config_path_for(fold_idx, test_id), encoding="utf-8") as handle:
+        recorded = json.load(handle).get("structure_sha256")
+    if recorded != sha256(resolve_structure_path(test_id)):
+        raise ValueError(
+            f"Completed fold test_id={test_id} in {CFG.output_dir} was trained on other "
+            "Stage 1 descriptors; move that output directory aside before retraining."
+        )
 
 
 def active_metric(metrics: Dict[str, float], suffix: str) -> float:
@@ -552,6 +572,8 @@ def run_loso() -> None:
 
         for fold_idx, test_id in fold_pairs:
             if test_id in completed:
+                if tracks_descriptor_file():
+                    check_completed_descriptors(fold_idx, test_id)
                 print(
                     f"Skipping fold {fold_idx:03d}, test_id={test_id}: "
                     "valid result row and model checkpoint already exist."
@@ -690,6 +712,8 @@ def run_loso() -> None:
                     "val_subjects": val_subjects,
                     "structure_path": structure_path,
                     "structure_dim": structure_dim,
+                    "structure_sha256": (sha256(resolve_structure_path(test_id))
+                                         if tracks_descriptor_file() else None),
                     "normalization_record_path": str(record_path(compact_infos, CFG)[0]),
                     "baseline_checkpoint_sha256": sha256(baseline_model_path) if baseline_model_path else None,
                     "x_min": x_min,
@@ -704,11 +728,7 @@ def run_loso() -> None:
                 }
             )
 
-            fold_config_path = os.path.join(
-                CFG.output_dir,
-                "configs",
-                f"config_fold_{fold_idx:03d}_test_id_{test_id}.json",
-            )
+            fold_config_path = fold_config_path_for(fold_idx, test_id)
             write_json(fold_config_path, fold_config)
 
             selection = ValidationSelection()

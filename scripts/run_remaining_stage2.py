@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 import math
 import os
 import subprocess
@@ -132,6 +134,27 @@ def completed_test_ids(results_path: Path, output_dir: Path) -> frozenset[int]:
     return frozenset(valid)
 
 
+def file_sha256(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def check_descriptors(config: Config, status: ExperimentStatus) -> None:
+    """Completed DTOF folds count only if trained on the current Stage 1 descriptor files."""
+    for test_id in sorted(status.completed_ids):
+        fold_config = status.output_dir / "configs" / f"config_fold_{test_id + 1:03d}_test_id_{test_id}.json"
+        recorded = (json.loads(fold_config.read_text(encoding="utf-8")).get("structure_sha256")
+                    if fold_config.is_file() else None)
+        descriptor = resolve_from_repo(Path(config.structure_feature_path.format(
+            test_id=test_id, test_id_1based=test_id + 1)))
+        if recorded is None or recorded != file_sha256(descriptor):
+            raise ValueError(
+                f"{display_path(status.output_dir)} holds fold test_id={test_id} trained on other "
+                "Stage 1 descriptors; move that output directory aside before retraining."
+            )
+
+
 def load_status(config_path: Path) -> tuple[Config, ExperimentStatus]:
     config = Config()
     apply_dataclass_config(config, load_yaml(config_path))
@@ -161,6 +184,8 @@ def discover_statuses(config_root: Path, targets: set[str] | None) -> list[Exper
             continue
         if targets is not None and config.target_mode not in targets:
             continue
+        if config.use_structure_features and config.subject_feature_source == "dtof":
+            check_descriptors(config, status)
         if not status.is_complete and not config.resume:
             raise ValueError(
                 f"Pending config must set resume: true before batch execution: "

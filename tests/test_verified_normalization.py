@@ -139,6 +139,100 @@ class VerifiedNormalizationTests(unittest.TestCase):
             norm.scan_verified(self.infos[0], 3)
 
 
+    def test_reported_sto2_rounding_is_accepted_without_mutating_statistics(self):
+        values = (np.array([1.9177836, 2.1732478], dtype=np.float32),
+                  np.array([6.3702555, 6.0736647], dtype=np.float32),
+                  np.array([.7005365], dtype=np.float32),
+                  np.array([.12150203], dtype=np.float32))
+        actual = {k: a.copy() for k, a in zip(norm.KEYS, values)}
+        actual["x_max"] = np.array([6.3702540, 6.0736637], dtype=np.float32)
+        before_actual = {k: a.copy() for k, a in actual.items()}
+        before_expected = tuple(a.copy() for a in values)
+        with self.assertWarnsRegex(RuntimeWarning, "x_max.*rounding"):
+            norm.assert_matching(actual, values, "Pretrained baseline")
+        for key in norm.KEYS:
+            np.testing.assert_array_equal(actual[key], before_actual[key])
+        for after, before in zip(values, before_expected):
+            np.testing.assert_array_equal(after, before)
+
+    def test_four_float32_steps_in_input_extrema_are_accepted(self):
+        values = norm.load_or_fit(self.infos, self.cfg)
+        actual = {k: a.copy() for k, a in zip(norm.KEYS, values)}
+        for key in ("x_min", "x_max"):
+            for _ in range(4):
+                actual[key] = np.nextafter(actual[key], np.float32(np.inf))
+        with self.assertWarns(RuntimeWarning):
+            norm.assert_matching(actual, values)
+
+    def test_more_than_four_float32_steps_is_rejected(self):
+        values = norm.load_or_fit(self.infos, self.cfg)
+        actual = {k: a.copy() for k, a in zip(norm.KEYS, values)}
+        for _ in range(5):
+            actual["x_max"] = np.nextafter(actual["x_max"], np.float32(np.inf))
+        with self.assertRaisesRegex(ValueError, "x_max.*retraining"):
+            norm.assert_matching(actual, values)
+
+    def test_narrow_channel_does_not_hide_normalization_change(self):
+        values = (np.array([6.0], dtype=np.float32),
+                  np.array([6.000001], dtype=np.float32),
+                  np.array([0.7], dtype=np.float32),
+                  np.array([0.1], dtype=np.float32))
+        actual = {k: a.copy() for k, a in zip(norm.KEYS, values)}
+        actual["x_max"] = np.nextafter(actual["x_max"], np.float32(np.inf))
+        with self.assertRaisesRegex(ValueError, "x_max"):
+            norm.assert_matching(actual, values)
+
+    def test_target_statistics_still_require_exact_matching(self):
+        values = norm.load_or_fit(self.infos, self.cfg)
+        for key in ("y_mean", "y_std"):
+            with self.subTest(key=key):
+                actual = {k: a.copy() for k, a in zip(norm.KEYS, values)}
+                actual[key] = np.nextafter(actual[key], np.float32(np.inf))
+                with self.assertRaisesRegex(ValueError, key):
+                    norm.assert_matching(actual, values)
+
+    def test_shape_mismatch_cannot_pass_by_broadcasting(self):
+        values = norm.load_or_fit(self.infos, self.cfg)
+        actual = {k: a.copy() for k, a in zip(norm.KEYS, values)}
+        actual["x_max"] = actual["x_max"][:1]
+        with self.assertRaisesRegex(ValueError, "x_max"):
+            norm.assert_matching(actual, values)
+
+    def test_nonfinite_or_missing_checkpoint_statistics_are_rejected(self):
+        values = norm.load_or_fit(self.infos, self.cfg)
+        for key in norm.KEYS:
+            for bad in (np.nan, np.inf):
+                with self.subTest(key=key, bad=bad):
+                    actual = {k: a.copy() for k, a in zip(norm.KEYS, values)}
+                    actual[key][0] = bad
+                    with self.assertRaisesRegex(ValueError, key):
+                        norm.assert_matching(actual, values)
+            actual = {k: a.copy() for k, a in zip(norm.KEYS, values)}
+            del actual[key]
+            with self.assertRaisesRegex(ValueError, key):
+                norm.assert_matching(actual, values)
+
+    def test_real_pretrained_builder_accepts_bounded_rounding(self):
+        import torch
+        from subject_nirs.stage2.config import CFG
+        from subject_nirs.stage2.loso import build_model_and_optimizer
+        from subject_nirs.stage2.model import CNN1D
+        values = norm.load_or_fit(self.infos, self.cfg)
+        actual = {k: a.copy() for k, a in zip(norm.KEYS, values)}
+        actual["test_id"] = 0
+        actual["x_max"] = np.nextafter(actual["x_max"], np.float32(np.inf))
+        path = self.root / "rounded_model.pth"
+        torch.save(dict(config=actual, model_state_dict=CNN1D(output_dim=1, latent_dim=0).state_dict()), path)
+        with patch.multiple(CFG, cohort_file=None, experiment_mode="fusion", baseline_init="pretrained",
+                            baseline_train="finetune", baseline_checkpoint_path=str(path)):
+            with self.assertWarnsRegex(RuntimeWarning, "Pretrained baseline.*x_max"):
+                model, optimizer, loaded_path = build_model_and_optimizer(32, 1, 0, normalization=values)
+        self.assertEqual(loaded_path, str(path))
+        self.assertIsNotNone(optimizer)
+        self.assertEqual(model.baseline.embedding_dim, 64)
+
+
+
 
 if __name__ == "__main__":
     unittest.main()

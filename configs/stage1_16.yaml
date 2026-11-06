@@ -1,9 +1,0 @@
-data_dir: ./data/raw/stage1
-experiment_name: relat_cons_16
-latent_dim: 16
-epochs: 200
-save_csv: false
-num_subjects: 154
-cohort_file: ./configs/subject_cohort.json
-cohort_fingerprint: 01deae79e5b1d272
-split_seed: 100

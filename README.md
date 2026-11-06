@@ -6,7 +6,7 @@
 
 ## 研究流程
 
-1. **DTOF 表徵學習**：以共用 temporal CNN 編碼各 SDS 的 DTOF 形狀與相對面積，透過個體原型對比學習與個體內緊湊性目標，學習單位長度的個體表徵。每名個體的描述子由最接近其球面中心的 acquisition embedding 代表。
+1. **DTOF 表徵學習**：以共用 temporal CNN 編碼各 SDS 的 DTOF 形狀與相對面積，透過個體原型對比學習與個體內緊湊性目標，學習單位長度的個體表徵。每名個體的描述子由最接近其球面中心的 acquisition embedding 代表。DTOF 先將每條曲線第一段連續 5 個非零 bin 之前的孤立 bin 設為 0（低於可靠計數），再計算面積；形狀取各 bin 佔該曲線面積比例的 log10，以固定範圍 [−10, 0] 線性縮放至 [0, 1]（空 bin 落在 −10）；面積為 0 的曲線直接報錯。
 2. **DRS 絕對參數預測**：以 CNN 建立 DRS-only baseline，再分別加入 DTOF 描述子或四維組織厚度特徵。融合方式包含 Concatenation、FiLM 與 Gated residual；訓練策略包含 Scratch 與 Fine-tuning。
 3. **跨個體評估**：每折保留 1 名測試個體、10 名驗證個體，其餘 125 名用於訓練。前處理與特徵標準化使用訓練個體估計，驗證資料用於模型選擇，測試個體用於最終評估。
 
@@ -68,7 +68,7 @@ data/
 bash scripts/run_stage1_loso.sh
 ```
 
-此入口執行 136-fold LOSO，並匯出 Stage 2 所需的描述子與測試個體 acquisition embeddings。主要設定為 [`configs/stage1_32.yaml`](configs/stage1_32.yaml)，輸出位於：
+此入口執行 136-fold LOSO，並匯出 Stage 2 所需的描述子與測試個體 acquisition embeddings。主要設定為 [`configs/stage1_32.yaml`](configs/stage1_32.yaml)，輸出目錄名稱取自設定中的 `experiment_name`：
 
 ```text
 artifacts/stage1/<test_id>/relat_cons_32/
@@ -77,7 +77,9 @@ artifacts/stage1/<test_id>/relat_cons_32/
 └── test_acquisition_embeddings.npz
 ```
 
-已完成且通過檢查的模型與匯出會保留。若只需要匯出既有模型的描述子，可執行：
+已完成且通過檢查的模型與匯出會保留；checkpoint 若不是目前的 DTOF 前處理版本，入口會直接報錯而不是沿用。不加 `--execute` 只列出待執行指令。
+
+若只需要匯出既有模型的描述子，可執行：
 
 ```bash
 python scripts/run_subject_cohort.py --phase exports --execute
@@ -103,7 +105,7 @@ bash scripts/run_stage2_loso.sh configs/stage2/concatenation/finetune/dtof_hc.ya
 bash scripts/run_stage2_loso.sh configs/stage2/concatenation/scratch/dtof_hc.yaml
 ```
 
-FiLM、Gated residual、厚度特徵及 StO₂ 的設定分別位於對應的 `configs/stage2/<fusion>/<strategy>/` 目錄。各設定直接定義初始化、學習率、融合方式及訓練參數。
+FiLM、Gated residual、厚度特徵及 StO₂ 的設定分別位於對應的 `configs/stage2/<fusion>/<strategy>/` 目錄。各設定直接定義初始化、學習率、融合方式及訓練參數。DTOF 實驗的每個 fold 會記錄所用描述子檔案的 SHA-256；續跑時若描述子已改變，會拒絕沿用舊 fold。
 
 | 訓練策略 | DRS 初始化 | DRS 初始 LR | 融合初始 LR | 融合介入方式 |
 | --- | --- | --- | --- | --- |
@@ -150,7 +152,7 @@ artifacts/stage2/<fusion>/<strategy>/<feature>/<target>/
 python -m subject_nirs.stage2.comparison --root ./artifacts/stage2 --output-dir ./results/tables/stage2/fusion_comparison
 ```
 
-第二階段效能主表包含 pooled OOF RMSE、subject RMSE 中位數 [Q25, Q75]、平均逐人絕對 Bias、平均配對 ΔRMSE [95% CI]、改善個體比例，以及依 baseline 難度固定分組的 Q1–Q4 平均 ΔRMSE。ΔRMSE 定義為融合模型減 baseline，負值表示改善；tHb 單位為 μM，StO₂ 誤差以百分點（percentage points）呈現。
+第二階段效能主表以 subject RMSE 中位數 [Q25, Q75] 呈現個體誤差分布，另列平均逐人絕對 Bias、平均配對 ΔRMSE [95% CI]、改善個體比例，以及依 baseline 難度固定分組的 Q1–Q4 平均 ΔRMSE。ΔRMSE 定義為融合模型減 baseline，負值表示改善；tHb 單位為 μM，StO₂ 誤差以百分點（percentage points）呈現。
 
 配對統計檢定與效果量保留於補充 CSV。CI 使用 subject-level 配對 bootstrap，屬於 OOF 結果的近似描述，並不涵蓋完整重訓、LOSO 訓練集重疊及超參數選擇的不確定性。分析預設採用完整的 LOSO 實驗。
 

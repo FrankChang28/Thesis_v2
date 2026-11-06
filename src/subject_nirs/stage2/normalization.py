@@ -4,6 +4,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -112,9 +113,31 @@ def validate_values(values):
 
 
 def assert_matching(actual, expected, context="checkpoint"):
+    """Require matching statistics, allowing bounded float32 input-range rounding."""
     for key, wanted in zip(KEYS, expected):
-        if key not in actual or not np.array_equal(np.asarray(actual[key], dtype=np.float32), wanted):
-            raise ValueError(f"{context}: {key} differs from verified training normalization; retraining required")
+        if key in actual:
+            observed = np.asarray(actual[key], dtype=np.float32)
+            wanted = np.asarray(wanted, dtype=np.float32)
+            compatible = (observed.shape == wanted.shape
+                          and np.isfinite(observed).all() and np.isfinite(wanted).all())
+            if compatible and np.array_equal(observed, wanted):
+                continue
+            if compatible and key in ("x_min", "x_max"):
+                # Bound differences by both float32 spacing and channel range.
+                spacing = np.maximum(np.abs(np.spacing(observed)), np.abs(np.spacing(wanted)))
+                span = (np.asarray(expected[1], dtype=np.float64)
+                        - np.asarray(expected[0], dtype=np.float64))
+                tolerance = np.minimum(4.0 * spacing.astype(np.float64), 1e-6 * span)
+                difference = np.abs(observed.astype(np.float64) - wanted.astype(np.float64))
+                if np.all(difference <= tolerance):
+                    warnings.warn(
+                        f"{context}: {key} has float32 rounding differences "
+                        f"(max_abs={difference.max():.9g}); using verified training normalization",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    continue
+        raise ValueError(f"{context}: {key} differs from verified training normalization; retraining required")
 
 
 def record_path(infos, cfg):

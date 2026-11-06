@@ -116,3 +116,21 @@ def test_all_canonical_scratch_configs_are_progressive(target):
             assert cfg.fusion_ramp_epochs == 1 and cfg.output_variant == ""
             assert cfg.subject_feature_source == feature and cfg.fusion_method == method
             assert cfg.target_mode == target and cfg.resume
+
+
+def test_audit_rejects_folds_trained_on_other_descriptors(tmp_path):
+    descriptor = tmp_path / "stage1/0/dtof.npz"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_bytes(b"current descriptors")
+    config = MODULE.Config(subject_feature_source="dtof",
+                           structure_feature_path=str(tmp_path / "stage1/{test_id}/dtof.npz"))
+    output = tmp_path / "out"
+    (output / "configs").mkdir(parents=True)
+    fold_config = output / "configs/config_fold_001_test_id_0.json"
+    status = MODULE.ExperimentStatus(tmp_path / "x.yaml", output, frozenset({0}), frozenset({0}))
+    fold_config.write_text('{"structure_sha256": "%s"}' % MODULE.file_sha256(descriptor))
+    MODULE.check_descriptors(config, status)
+    for recorded in ("{}", '{"structure_sha256": "old"}'):
+        fold_config.write_text(recorded)
+        with pytest.raises(ValueError, match="other Stage 1 descriptors"):
+            MODULE.check_descriptors(config, status)

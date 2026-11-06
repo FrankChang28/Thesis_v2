@@ -10,10 +10,14 @@ import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 from ..common.cohort import cohort_from_args, Cohort
 
-# Preprocessing constants are intentionally fixed to keep the public config small.
+# DTOF shape: bins before the first run of DTOF_MIN_RUN nonzero bins are zeroed (isolated
+# photons below the reliable count), then log10 of each bin's fraction of its curve area,
+# scaled from the fixed range [-10, 0] to [0, 1]. Empty bins map to log10(_EPS) = -10.
 _EPS = 1e-10
-_PREPROCESS_ROWS = 20_000
-_MAX_QUANTILE_VALUES = 2_000_000
+TEMPORAL_LOW, TEMPORAL_HIGH = -10.0, 0.0
+DTOF_MIN_RUN = 5
+# Stored in every checkpoint; evaluation and the cohort runner refuse other versions.
+PREPROCESS_VERSION = "log10_fraction_fixed_range_onset5_v3"
 
 
 @dataclass
@@ -25,8 +29,6 @@ class SplitInfo:
 
 @dataclass
 class PreprocessStats:
-    temporal_low: float
-    temporal_high: float
     area_mean: np.ndarray
     area_std: np.ndarray
     condition_min: np.ndarray
@@ -34,8 +36,7 @@ class PreprocessStats:
 
     def to_dict(self) -> Dict[str, object]:
         return {
-            "temporal_low": float(self.temporal_low),
-            "temporal_high": float(self.temporal_high),
+            "dtof_preprocess": PREPROCESS_VERSION,
             "area_mean": self.area_mean.tolist(),
             "area_std": self.area_std.tolist(),
             "condition_min": self.condition_min.tolist(),
@@ -332,34 +333,33 @@ def _subject_rows(subjects: np.ndarray, op_per_subject: int) -> np.ndarray:
     )
 
 
-def _fit_temporal_range(
-    temporal: torch.Tensor,
-    train_rows: np.ndarray,
-    seed: int,
-) -> Tuple[float, float]:
-    rng = np.random.default_rng(seed)
-    if len(train_rows) > _PREPROCESS_ROWS:
-        train_rows = np.sort(
-            rng.choice(train_rows, size=_PREPROCESS_ROWS, replace=False)
-        )
+def zero_before_onset(temporal: torch.Tensor) -> torch.Tensor:
+    """Zero the bins before each curve's first run of DTOF_MIN_RUN nonzero bins, in place.
 
-    row_values = temporal.index_select(0, torch.from_numpy(train_rows)).reshape(-1)
-    if row_values.numel() > _MAX_QUANTILE_VALUES:
-        chosen = rng.choice(
-            row_values.numel(),
-            size=_MAX_QUANTILE_VALUES,
-            replace=False,
-        )
-        row_values = row_values[torch.from_numpy(chosen)]
+    The rule reads only which bins are nonzero. Curves of one simulation replay the same
+    photons under different absorption, so they share one onset.
+    """
+    run = (temporal > 0).unfold(2, DTOF_MIN_RUN, 1).all(dim=-1)
+    if not bool(run.any(dim=2).all()):
+        raise ValueError(f"Found a DTOF curve without {DTOF_MIN_RUN} consecutive nonzero bins")
+    onset = run.byte().argmax(dim=2, keepdim=True)
+    bins = torch.arange(temporal.shape[2], device=temporal.device)
+    return temporal.masked_fill_(bins < onset, 0.0)
 
-    low, high = np.quantile(row_values.numpy(), [0.001, 0.999]).astype(float)
-    if not np.isfinite(low) or not np.isfinite(high) or high - low < 1e-8:
-        raise RuntimeError("Invalid temporal preprocessing range")
-    print(
-        f"Temporal clipping range from {len(train_rows)} training acquisitions: "
-        f"low={low:.6f}, high={high:.6f}"
-    )
-    return float(low), float(high)
+
+def dtof_inputs(temporal: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Raw DTOFs [N,S,T] -> scaled log curve fractions and log relative SDS areas.
+
+    Shared by training and checkpoint evaluation. Modifies ``temporal`` in place.
+    """
+    if not bool((temporal.sum(dim=2) > 0).all()):
+        raise ValueError("Found a DTOF curve with zero area")
+    zero_before_onset(temporal)
+    area = temporal.sum(dim=2)
+    relative_area = (area / area.sum(dim=1, keepdim=True)).log10_()
+    temporal.div_(area.unsqueeze(-1)).clamp_min_(_EPS).log10_()
+    temporal.clamp_(TEMPORAL_LOW, TEMPORAL_HIGH).sub_(TEMPORAL_LOW).div_(TEMPORAL_HIGH - TEMPORAL_LOW)
+    return temporal, relative_area
 
 
 def _preprocess(
@@ -367,20 +367,10 @@ def _preprocess(
     raw_conditions: torch.Tensor,
     split: SplitInfo,
     op_per_subject: int,
-    seed: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, PreprocessStats]:
-    area = temporal.sum(dim=2).clamp_min(_EPS)
-    total_area = area.sum(dim=1, keepdim=True).clamp_min(_EPS)
-    relative_area = (area / total_area).clamp_min(_EPS).log10_()
+    temporal, relative_area = dtof_inputs(temporal)
 
-    temporal.div_(area.unsqueeze(-1))
-    temporal.clamp_min_(_EPS).log10_()
-
-    train_rows = _subject_rows(split.train_subjects, op_per_subject)
-    low, high = _fit_temporal_range(temporal, train_rows, seed)
-    temporal.clamp_(low, high).sub_(low).div_(high - low)
-
-    train_index = torch.from_numpy(train_rows)
+    train_index = torch.from_numpy(_subject_rows(split.train_subjects, op_per_subject))
     area_train = relative_area.index_select(0, train_index)
     area_mean = area_train.mean(dim=0)
     area_std = area_train.std(dim=0, unbiased=False).clamp_min(1e-6)
@@ -396,8 +386,6 @@ def _preprocess(
         conditions[:, constant] = 0.0
 
     stats = PreprocessStats(
-        temporal_low=low,
-        temporal_high=high,
         area_mean=area_mean.numpy(),
         area_std=area_std.numpy(),
         condition_min=condition_min.numpy(),
@@ -445,7 +433,6 @@ def load_data_bundle(args) -> DataBundle:
         raw_conditions,
         split,
         op_per_subject,
-        int(args.seed),
     )
 
     train_dataset = SubjectGroupDataset(

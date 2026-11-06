@@ -23,11 +23,9 @@ import numpy as np
 import torch
 
 from .analysis_support import file_sha256, validate_checkpoints
+from .data import PREPROCESS_VERSION, dtof_inputs
 from .model import DTOFSubjectEncoder
 from .utils import unit_rows
-
-
-EPS = 1e-10
 
 
 class LazyDTOFArray:
@@ -158,24 +156,18 @@ def build_model(checkpoint: Mapping[str, Any], device: torch.device):
 
 def _stats_arrays(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     stats = checkpoint["preprocess_stats"]
+    if stats.get("dtof_preprocess") != PREPROCESS_VERSION:
+        raise ValueError(f"Checkpoint DTOF preprocessing is not {PREPROCESS_VERSION}; retrain Stage 1")
     return {
-        "low": float(stats["temporal_low"]),
-        "high": float(stats["temporal_high"]),
         "area_mean": torch.as_tensor(stats["area_mean"], dtype=torch.float32),
         "area_std": torch.as_tensor(stats["area_std"], dtype=torch.float32),
     }
 
 
 def preprocess_batch(raw_batch: np.ndarray, stats: Mapping[str, Any]):
-    temporal = torch.from_numpy(np.asarray(raw_batch, dtype=np.float32))
-    area = temporal.sum(dim=2).clamp_min(EPS)
-    total_area = area.sum(dim=1, keepdim=True).clamp_min(EPS)
-    relative_area = (area / total_area).clamp_min(EPS).log10()
+    temporal = torch.from_numpy(np.array(raw_batch, dtype=np.float32))
+    temporal, relative_area = dtof_inputs(temporal)
     relative_area = (relative_area - stats["area_mean"]) / stats["area_std"]
-
-    temporal = (temporal / area.unsqueeze(-1)).clamp_min(EPS).log10()
-    temporal = temporal.clamp(stats["low"], stats["high"])
-    temporal = (temporal - stats["low"]) / (stats["high"] - stats["low"])
     return temporal, relative_area
 
 

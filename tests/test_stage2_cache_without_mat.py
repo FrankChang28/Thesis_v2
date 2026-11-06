@@ -89,6 +89,16 @@ def test_baseline_and_finetune_train_and_resume_without_mat(
     assert checkpoint().is_file()
     assert len(list((Path(CFG.output_dir) / "predictions").glob("*_test_predictions.npz"))) == 1
     assert sha(baseline_path) == before
+    # A completed DTOF fold is reused only while its descriptor file is unchanged.
+    monkeypatch.setattr(CFG, "resume", True)
+    loso.run_loso()
+    bank = Path(CFG.structure_feature_path)
+    with np.load(bank) as data:
+        arrays = dict(data)
+    arrays["latent_raw"] = arrays["latent_raw"] + 1
+    np.savez(bank, **arrays)
+    with pytest.raises(ValueError, match="other Stage 1 descriptors"):
+        loso.run_loso()
 
 
 @pytest.mark.parametrize("method", ["concatenation", "film", "residual"])
