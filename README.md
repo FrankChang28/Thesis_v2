@@ -129,6 +129,17 @@ artifacts/stage2/<fusion>/<strategy>/<feature>/<target>/
 
 其中 `<feature>` 為 `dtof` 或 `metadata`，`<target>` 為 `hc` 或 `sto2`。各實驗包含 `loso_results.csv`、逐 fold checkpoint、設定及預測輸出。
 
+#### 只注入 CSF 與顱骨厚度（2 欄）
+
+`metadata` 設定固定讀取 `data/metadata_aligned.csv` 的四欄厚度（scalp、skull、CSF、sinus）。只用 CSF 與顱骨時，先把兩欄寫成每個 fold 的描述子，再經 DTOF 描述子路徑注入（`structure_feature_dim: 2`）；各 fold 同樣以該 fold 的訓練個體標準化：
+
+```bash
+python scripts/build_thickness_descriptor.py
+bash scripts/run_stage2_loso.sh configs/stage2_csf_skull/concatenation/finetune/hc.yaml
+```
+
+描述子寫在 `artifacts/thickness_descriptor/csf_skull/<test_id>/descriptor.npz`（欄位順序 `[csf, skull]`），結果寫在 `artifacts/stage2/concatenation/finetune/csf_skull/hc/`。其餘設定與 `configs/stage2/concatenation/finetune/dtof_hc.yaml` 相同（Concatenation、Fine-tuning、tHb）。
+
 ### 3. 使用既有 Stage 2 快取
 
 完整的 `cache/stage2/` 包含 validation 資料及所需的 compact training 子集時，可直接執行第二階段，無須重新讀取原始 DRS MAT。兩種目標共用含 tHb／StO₂ 的快取；請維持相同的個體名單、抽樣及前處理設定。
